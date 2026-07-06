@@ -1,0 +1,28 @@
+# Global carriers configuration.
+# Copy to /etc/carriers/carriers.toml and adjust.
+
+# Hostname of this machine. Used as the EHLO/LHLO name, recorded in the sealed
+# Authentication-Results, and used as the `helo` identity when checking inbound SPF.
+hostname = "mx.lists.example.org"
+
+# Where the ingress listener binds. Put this behind your MTA on a trusted interface.
+listen = "127.0.0.1:2400"
+
+# Ingress protocol: "lmtp" (recommended, when a front MTA relays to carriers) or "smtp".
+protocol = "lmtp"
+
+# SQLite database holding membership and operational state (dedup, etc.).
+db_path = "/var/lib/carriers/carriers.db"
+
+# Directory of per-list `<name>.toml` files.
+lists_dir = "/etc/carriers/lists"
+
+[smarthost]
+# Outbound copies are relayed here. A local MTA (Postfix/Exim) is the intended target: it
+# owns queueing, retries, MX resolution and outbound TLS.
+host = "127.0.0.1"
+port = 25
+# Implicit TLS (SMTPS). Leave false for a local relay.
+implicit_tls = false
+# Permit plaintext delivery. Only sensible for a trusted local relay (e.g. 127.0.0.1).
+allow_plaintext = true

@@ -1,0 +1,40 @@
+# A mailing list definition. The file name (dev.toml) is the list's short name.
+
+posting_address = "dev@lists.example.org"
+display_name = "Dev List"
+# List-Id namespace (RFC 2919). Defaults to the posting address with `@` replaced by `.`.
+# list_id = "dev.lists.example.org"
+
+owner = "owner@example.org"
+archive_url = "https://lists.example.org/archive/dev"
+help_url = "https://lists.example.org/help"
+subscribe_url = "https://lists.example.org/subscribe/dev"
+
+# One-click unsubscribe (RFC 8058), required by Google/Yahoo bulk-sender rules. When set,
+# carriers emits both `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`.
+unsubscribe_oneclick = "https://lists.example.org/u/dev?token=..."
+
+# DKIM signing key for the list domain. Generate with:
+#   carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.pem
+[dkim]
+selector = "dkim"
+key_file = "/etc/carriers/keys/dev.dkim.pem"
+algorithm = "ed25519" # or "rsa"
+# domain = "lists.example.org"  # defaults to the posting address domain
+
+# ARC sealing key. Use a distinct selector from DKIM.
+[arc]
+selector = "arc"
+key_file = "/etc/carriers/keys/dev.arc.pem"
+algorithm = "ed25519"
+
+[policy]
+# Only subscribers may post.
+subscribers_only = true
+# Subject prefix such as "[dev]". Empty (default) keeps DKIM intact. A non-empty value
+# rewrites Subject and WILL break the author's DKIM signature (and DMARC for p=reject domains).
+subject_prefix = ""
+
+# Optional flat member seed file (one address per line, `#` comments). Import with
+# `carriers sync`.
+# members_file = "/var/lib/carriers/lists/dev/members"

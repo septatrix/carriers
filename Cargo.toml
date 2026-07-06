@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/carriers-core", "crates/carriers"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/septatrix/carriers"
+
+[workspace.dependencies]
+carriers-core = { path = "crates/carriers-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
