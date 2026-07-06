@@ -1,0 +1,46 @@
+[Unit]
+Description=carriers DMARC/ARC-compliant mailing list
+Documentation=https://github.com/septatrix/carriers
+Requires=carriers.socket
+After=carriers.socket network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/carriers --config /etc/carriers/carriers.toml run
+Restart=on-failure
+RestartSec=2
+
+# Run unprivileged. Create the `carriers` user/group beforehand, e.g.
+#   systemd-sysusers or: useradd --system --no-create-home --shell /usr/sbin/nologin carriers
+User=carriers
+Group=carriers
+
+# Managed state directory at /var/lib/carriers (0700 carriers:carriers). Set
+# db_path = "/var/lib/carriers/carriers.db" in carriers.toml.
+StateDirectory=carriers
+
+# Sandboxing. Config and keys under /etc/carriers stay readable; only the state
+# directory is writable.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

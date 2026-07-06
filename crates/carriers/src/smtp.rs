@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
+use listenfd::ListenFd;
 use smtp_proto::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -24,8 +25,7 @@ use crate::deliver::deliver;
 use crate::state::AppState;
 
 pub async fn serve(state: Arc<AppState>) -> Result<()> {
-    let listener = TcpListener::bind(state.config.listen).await?;
-    info!(addr = %state.config.listen, protocol = ?state.config.protocol, "listening");
+    let listener = bind_listener(&state).await?;
 
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -35,6 +35,28 @@ pub async fn serve(state: Arc<AppState>) -> Result<()> {
                 warn!(%peer, %err, "connection error");
             }
         });
+    }
+}
+
+/// Obtain the ingress listener.
+///
+/// Under systemd socket activation the socket is passed to us as an inherited file descriptor
+/// (`LISTEN_FDS`); we adopt it and the `listen` config value is ignored. Otherwise we bind the
+/// configured address ourselves.
+async fn bind_listener(state: &AppState) -> Result<TcpListener> {
+    if let Some(std_listener) = ListenFd::from_env().take_tcp_listener(0)? {
+        std_listener.set_nonblocking(true)?;
+        let listener = TcpListener::from_std(std_listener)?;
+        info!(
+            addr = ?listener.local_addr().ok(),
+            protocol = ?state.config.protocol,
+            "listening (systemd socket activation)"
+        );
+        Ok(listener)
+    } else {
+        let listener = TcpListener::bind(state.config.listen).await?;
+        info!(addr = %state.config.listen, protocol = ?state.config.protocol, "listening");
+        Ok(listener)
     }
 }
 

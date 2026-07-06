@@ -77,6 +77,28 @@ carriers -c /etc/carriers/carriers.toml run
 Point your MTA to relay mail for the list address to the carriers `listen` socket (e.g. an LMTP
 transport in Postfix), and set carriers' `smarthost` back to that MTA for outbound.
 
+## Running under systemd
+
+Unit files are provided in [`contrib/systemd/`](contrib/systemd/). carriers supports
+**socket activation**: when started from a systemd `.socket` unit it adopts the inherited
+listening socket, so restarts don't drop the port and the socket can be held open before the
+service is ready. Under socket activation the `listen` value in `carriers.toml` is ignored (the
+`.socket` unit's `ListenStream=` wins).
+
+```sh
+install -Dm755 target/release/carriers /usr/bin/carriers
+install -Dm644 contrib/systemd/carriers.socket  /etc/systemd/system/carriers.socket
+install -Dm644 contrib/systemd/carriers.service /etc/systemd/system/carriers.service
+useradd --system --no-create-home --shell /usr/sbin/nologin carriers
+systemctl daemon-reload
+systemctl enable --now carriers.socket carriers.service
+```
+
+The service is sandboxed (`ProtectSystem=strict`, a managed `StateDirectory=carriers`, a
+system-call filter, etc.); keep `db_path = "/var/lib/carriers/carriers.db"` so the database
+lives in the writable state directory, and keep config/keys under `/etc/carriers` (read-only to
+the service). Running `carriers run` directly (without systemd) simply binds `listen` itself.
+
 ## DNS you must publish
 
 For the **list domain** (e.g. `lists.example.org`):

@@ -6,6 +6,7 @@
 hostname = "mx.lists.example.org"
 
 # Where the ingress listener binds. Put this behind your MTA on a trusted interface.
+# Ignored when started via systemd socket activation (the .socket unit's ListenStream wins).
 listen = "127.0.0.1:2400"
 
 # Ingress protocol: "lmtp" (recommended, when a front MTA relays to carriers) or "smtp".
