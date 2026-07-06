@@ -197,6 +197,9 @@ Deferred / ideas:
 - opt-in `Subject`-prefix / footer support
 - per-list (rather than global) Sieve policies, and richer policy context (spam/DKIM results,
   message size) exposed to scripts
+- add CI, including [REUSE](https://reuse.software/) license-compliance checking (`reuse lint`)
+  to keep licensing machine-readable and consistent (esp. given the MPL-2.0 project vs the
+  AGPL-3.0 `sieve-rs` dependency)
 
 ## License
 
