@@ -1,10 +1,9 @@
-//! SQLite-backed membership and operational state.
-//!
-//! rusqlite is synchronous; the pipeline touches the store in short, non-awaiting bursts,
-//! so a plain `Mutex<Connection>` is sufficient and avoids pulling in an async SQL runtime.
+//! SQLite-backed membership and operational state, using sqlx (async, typed, pooled).
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::str::FromStr;
+
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::Result;
 
@@ -23,72 +22,84 @@ CREATE TABLE IF NOT EXISTS seen_messages (
 ";
 
 pub struct Store {
-    conn: Mutex<rusqlite::Connection>,
+    pool: SqlitePool,
 }
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Self> {
-        let conn = rusqlite::Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Store {
-            conn: Mutex::new(conn),
-        })
+    /// Open (creating if necessary) a file-backed database and apply the schema.
+    pub async fn open(path: &Path) -> Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new().connect_with(options).await?;
+        Self::init(pool).await
     }
 
-    pub fn open_in_memory() -> Result<Self> {
-        let conn = rusqlite::Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Store {
-            conn: Mutex::new(conn),
-        })
+    /// Open a private in-memory database (used by tests). A single connection keeps the
+    /// in-memory database alive and shared across queries.
+    pub async fn open_in_memory() -> Result<Self> {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        Self::init(pool).await
     }
 
-    pub fn add_member(&self, list: &str, address: &str) -> Result<()> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.execute(
-            "INSERT OR IGNORE INTO members(list, address) VALUES(?1, ?2)",
-            (list, address.trim().to_ascii_lowercase()),
-        )?;
+    async fn init(pool: SqlitePool) -> Result<Self> {
+        sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+        Ok(Store { pool })
+    }
+
+    pub async fn add_member(&self, list: &str, address: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO members(list, address) VALUES(?, ?)")
+            .bind(list)
+            .bind(address.trim().to_ascii_lowercase())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    pub fn remove_member(&self, list: &str, address: &str) -> Result<()> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.execute(
-            "DELETE FROM members WHERE list = ?1 AND address = ?2",
-            (list, address.trim().to_ascii_lowercase()),
-        )?;
+    pub async fn remove_member(&self, list: &str, address: &str) -> Result<()> {
+        sqlx::query("DELETE FROM members WHERE list = ? AND address = ?")
+            .bind(list)
+            .bind(address.trim().to_ascii_lowercase())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    pub fn is_member(&self, list: &str, address: &str) -> Result<bool> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM members WHERE list = ?1 AND address = ?2",
-            (list, address.trim().to_ascii_lowercase()),
-            |row| row.get(0),
-        )?;
+    pub async fn is_member(&self, list: &str, address: &str) -> Result<bool> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM members WHERE list = ? AND address = ?")
+                .bind(list)
+                .bind(address.trim().to_ascii_lowercase())
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count > 0)
     }
 
-    pub fn members(&self, list: &str) -> Result<Vec<String>> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt =
-            conn.prepare("SELECT address FROM members WHERE list = ?1 ORDER BY address")?;
-        let rows = stmt.query_map([list], |row| row.get::<_, String>(0))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    pub async fn members(&self, list: &str) -> Result<Vec<String>> {
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT address FROM members WHERE list = ? ORDER BY address")
+                .bind(list)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
     }
 
     /// Record a `Message-ID` for loop/duplicate suppression.
     ///
     /// Returns `true` if it was newly inserted, `false` if we have already processed it.
-    pub fn record_message(&self, list: &str, message_id: &str) -> Result<bool> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        let changed = conn.execute(
+    pub async fn record_message(&self, list: &str, message_id: &str) -> Result<bool> {
+        let result = sqlx::query(
             "INSERT OR IGNORE INTO seen_messages(list, message_id, seen_at) \
-             VALUES(?1, ?2, strftime('%s','now'))",
-            (list, message_id),
-        )?;
-        Ok(changed > 0)
+             VALUES(?, ?, strftime('%s','now'))",
+        )
+        .bind(list)
+        .bind(message_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 }

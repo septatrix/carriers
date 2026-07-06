@@ -1,21 +1,25 @@
-//! Membership access behind a provider trait.
+//! Membership access behind an async provider trait.
 //!
 //! Membership is read through [`MemberProvider`] so the source can change without touching
 //! the pipeline. Today the only implementation is [`SqliteMemberProvider`] (backed by
-//! [`Store`]); a future pull-based provider that queries an external member database can slot
-//! in here, using the same SQLite store as its offline cache.
+//! [`Store`]); a future pull-based provider that queries an external member database over the
+//! network can slot in here — the trait is already async — using the same SQLite store as its
+//! offline cache.
 
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::error::Result;
 use crate::store::Store;
 
+#[async_trait]
 pub trait MemberProvider: Send + Sync {
-    fn is_member(&self, list: &str, address: &str) -> Result<bool>;
-    fn recipients(&self, list: &str) -> Result<Vec<String>>;
-    fn add(&self, list: &str, address: &str) -> Result<()>;
-    fn remove(&self, list: &str, address: &str) -> Result<()>;
+    async fn is_member(&self, list: &str, address: &str) -> Result<bool>;
+    async fn recipients(&self, list: &str) -> Result<Vec<String>>;
+    async fn add(&self, list: &str, address: &str) -> Result<()>;
+    async fn remove(&self, list: &str, address: &str) -> Result<()>;
 }
 
 pub struct SqliteMemberProvider {
@@ -29,7 +33,7 @@ impl SqliteMemberProvider {
 
     /// Import addresses from a flat file (one per line, `#` comments and blanks ignored).
     /// Returns the number of addresses imported.
-    pub fn seed_from_file(&self, list: &str, path: &Path) -> Result<usize> {
+    pub async fn seed_from_file(&self, list: &str, path: &Path) -> Result<usize> {
         let text = std::fs::read_to_string(path)?;
         let mut n = 0;
         for line in text.lines() {
@@ -37,24 +41,25 @@ impl SqliteMemberProvider {
             if addr.is_empty() || addr.starts_with('#') {
                 continue;
             }
-            self.store.add_member(list, addr)?;
+            self.store.add_member(list, addr).await?;
             n += 1;
         }
         Ok(n)
     }
 }
 
+#[async_trait]
 impl MemberProvider for SqliteMemberProvider {
-    fn is_member(&self, list: &str, address: &str) -> Result<bool> {
-        self.store.is_member(list, address)
+    async fn is_member(&self, list: &str, address: &str) -> Result<bool> {
+        self.store.is_member(list, address).await
     }
-    fn recipients(&self, list: &str) -> Result<Vec<String>> {
-        self.store.members(list)
+    async fn recipients(&self, list: &str) -> Result<Vec<String>> {
+        self.store.members(list).await
     }
-    fn add(&self, list: &str, address: &str) -> Result<()> {
-        self.store.add_member(list, address)
+    async fn add(&self, list: &str, address: &str) -> Result<()> {
+        self.store.add_member(list, address).await
     }
-    fn remove(&self, list: &str, address: &str) -> Result<()> {
-        self.store.remove_member(list, address)
+    async fn remove(&self, list: &str, address: &str) -> Result<()> {
+        self.store.remove_member(list, address).await
     }
 }

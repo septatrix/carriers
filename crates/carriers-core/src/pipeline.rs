@@ -70,7 +70,7 @@ pub async fn prepare(
         .map(|s| s.to_ascii_lowercase());
     if list.cfg.policy.subscribers_only {
         let sender = from.as_deref().unwrap_or("");
-        if !members.is_member(&list.name, sender)? {
+        if !members.is_member(&list.name, sender).await? {
             return Err(Error::Rejected(format!(
                 "sender `{sender}` is not a subscriber of `{}`",
                 list.name
@@ -80,14 +80,14 @@ pub async fn prepare(
 
     // Duplicate suppression by Message-ID.
     if let Some(message_id) = parsed.message_id() {
-        if !store.record_message(&list.name, message_id)? {
+        if !store.record_message(&list.name, message_id).await? {
             return Err(Error::Rejected(format!(
                 "duplicate Message-ID `{message_id}`"
             )));
         }
     }
 
-    let recipients = members.recipients(&list.name)?;
+    let recipients = members.recipients(&list.name).await?;
 
     let augmented = augment(list, raw);
     let message = sign_and_seal(authenticator, list, hostname, &augmented, ingress).await?;

@@ -14,7 +14,7 @@ pub enum Error {
     Toml(#[from] toml::de::Error),
 
     #[error("database error: {0}")]
-    Db(#[from] rusqlite::Error),
+    Db(#[from] sqlx::Error),
 
     #[error("key error: {0}")]
     Key(String),

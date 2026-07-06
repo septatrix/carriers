@@ -22,9 +22,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn load(config: Config) -> Result<Self> {
+    pub async fn load(config: Config) -> Result<Self> {
         let store = Arc::new(
             Store::open(&config.db_path)
+                .await
                 .with_context(|| format!("opening database {}", config.db_path.display()))?,
         );
         let members: Arc<dyn MemberProvider> = Arc::new(SqliteMemberProvider::new(store.clone()));

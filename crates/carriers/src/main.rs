@@ -108,15 +108,15 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Run => run(&cli.config).await,
         Command::Genkey(args) => genkey(args),
-        Command::Sync => sync(&cli.config),
-        Command::Member(cmd) => member(&cli.config, cmd),
+        Command::Sync => sync(&cli.config).await,
+        Command::Member(cmd) => member(&cli.config, cmd).await,
     }
 }
 
 async fn run(config_path: &Path) -> Result<()> {
     let config = Config::load(config_path)
         .with_context(|| format!("loading config {}", config_path.display()))?;
-    let state = Arc::new(AppState::load(config)?);
+    let state = Arc::new(AppState::load(config).await?);
     smtp::serve(state).await
 }
 
@@ -150,20 +150,20 @@ fn split_txt(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn open_store(config: &Config) -> Result<Arc<Store>> {
-    Ok(Arc::new(Store::open(&config.db_path).with_context(
+async fn open_store(config: &Config) -> Result<Arc<Store>> {
+    Ok(Arc::new(Store::open(&config.db_path).await.with_context(
         || format!("opening database {}", config.db_path.display()),
     )?))
 }
 
-fn sync(config_path: &Path) -> Result<()> {
+async fn sync(config_path: &Path) -> Result<()> {
     let config = Config::load(config_path)?;
-    let store = open_store(&config)?;
+    let store = open_store(&config).await?;
     let provider = SqliteMemberProvider::new(store);
     let lists = load_lists(&config)?;
     for list in lists.values() {
         if let Some(members_file) = &list.cfg.members_file {
-            let n = provider.seed_from_file(&list.name, members_file)?;
+            let n = provider.seed_from_file(&list.name, members_file).await?;
             println!(
                 "{}: imported {n} members from {}",
                 list.name,
@@ -174,22 +174,22 @@ fn sync(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
+async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
     let config = Config::load(config_path)?;
-    let store = open_store(&config)?;
+    let store = open_store(&config).await?;
     let provider = SqliteMemberProvider::new(store);
     match cmd {
         MemberCommand::Add { list, address } => {
             resolve_list_name(&config, &list)?;
-            provider.add(&list, &address)?;
+            provider.add(&list, &address).await?;
             println!("added {address} to {list}");
         }
         MemberCommand::Remove { list, address } => {
-            provider.remove(&list, &address)?;
+            provider.remove(&list, &address).await?;
             println!("removed {address} from {list}");
         }
         MemberCommand::List { list } => {
-            for address in provider.recipients(&list)? {
+            for address in provider.recipients(&list).await? {
                 println!("{address}");
             }
         }
