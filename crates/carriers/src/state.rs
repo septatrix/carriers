@@ -18,8 +18,8 @@ pub struct AppState {
     pub authenticator: MessageAuthenticator,
     pub store: Arc<Store>,
     pub members: Arc<dyn MemberProvider>,
-    /// Compiled Sieve moderation policies, if a policies directory is configured.
-    pub policy: Option<PolicyEngine>,
+    /// Sieve moderation policies: the built-ins plus any custom scripts from `policies_dir`.
+    pub policy: PolicyEngine,
     /// Lists keyed by their lowercased posting address.
     pub lists: HashMap<String, Arc<List>>,
 }
@@ -36,18 +36,15 @@ impl AppState {
             .context("initialising DNS resolver from system configuration")?;
 
         let policy = match &config.policies_dir {
-            Some(dir) => {
-                let engine = PolicyEngine::load(dir)
-                    .with_context(|| format!("loading Sieve policies from {}", dir.display()))?;
-                info!(count = engine.names().count(), "loaded Sieve policies");
-                Some(engine)
-            }
-            None => None,
+            Some(dir) => PolicyEngine::load(dir)
+                .with_context(|| format!("loading Sieve policies from {}", dir.display()))?,
+            None => PolicyEngine::new().context("compiling built-in policies")?,
         };
+        info!(custom_policies = policy.names().count(), "loaded policies");
 
         let lists = load_lists(&config)?;
         info!(count = lists.len(), "loaded lists");
-        validate_policies(&lists, policy.as_ref())?;
+        validate_policies(&lists, &policy)?;
 
         Ok(AppState {
             config,
@@ -71,22 +68,14 @@ impl AppState {
 }
 
 /// Fail fast if a list references a Sieve policy that was not loaded.
-fn validate_policies(
-    lists: &HashMap<String, Arc<List>>,
-    policy: Option<&PolicyEngine>,
-) -> Result<()> {
+fn validate_policies(lists: &HashMap<String, Arc<List>>, policy: &PolicyEngine) -> Result<()> {
     for list in lists.values() {
         if let Some(name) = &list.cfg.policy.sieve {
-            match policy {
-                Some(engine) if engine.contains(name) => {}
-                Some(_) => anyhow::bail!(
+            if !policy.contains(name) {
+                anyhow::bail!(
                     "list `{}` references unknown Sieve policy `{name}`",
                     list.name
-                ),
-                None => anyhow::bail!(
-                    "list `{}` references Sieve policy `{name}` but no policies_dir is configured",
-                    list.name
-                ),
+                );
             }
         }
     }

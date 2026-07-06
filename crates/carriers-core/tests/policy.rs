@@ -94,3 +94,50 @@ fn compile_error_is_reported() {
     write_policy(&dir, "broken", "if address :list \"from\" {\n"); // malformed
     assert!(PolicyEngine::load(&dir).is_err());
 }
+
+#[test]
+fn builtin_policies_behave_like_the_posting_modes() {
+    let engine = PolicyEngine::new().unwrap();
+    let sets = sets(); // subscribers: alice; members: alice, bot
+    let eval = |policy: &str, from: &str| {
+        engine
+            .evaluate(policy, "dev", from, &message(from), &sets)
+            .unwrap()
+    };
+
+    // open: everyone approved.
+    assert_eq!(
+        eval("open", "mallory@evil.example"),
+        PolicyDecision::Approve
+    );
+
+    // subscribers: subscriber approved, everyone else held.
+    assert_eq!(
+        eval("subscribers", "alice@example.com"),
+        PolicyDecision::Approve
+    );
+    assert_eq!(
+        eval("subscribers", "bot@example.net"),
+        PolicyDecision::Moderate
+    );
+
+    // members: any member approved, others held.
+    assert_eq!(eval("members", "bot@example.net"), PolicyDecision::Approve);
+    assert_eq!(
+        eval("members", "mallory@evil.example"),
+        PolicyDecision::Moderate
+    );
+
+    // moderated: everyone held.
+    assert_eq!(
+        eval("moderated", "alice@example.com"),
+        PolicyDecision::Moderate
+    );
+}
+
+#[test]
+fn custom_policy_may_not_reuse_a_builtin_name() {
+    let dir = tempdir();
+    write_policy(&dir, "subscribers", "# tries to shadow a built-in\n");
+    assert!(PolicyEngine::load(&dir).is_err());
+}

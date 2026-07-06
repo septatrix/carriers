@@ -4,6 +4,10 @@
 //! by the administrator; a list selects one by name via `[policy] sieve = "<name>"`. Policies
 //! are global and static — compiled once at startup.
 //!
+//! The four built-in `[policy] posting` modes (`open`, `subscribers`, `members`, `moderated`)
+//! are themselves compiled Sieve scripts (see [`BUILTIN_SCRIPTS`]), so every list — whether it
+//! uses a built-in mode or a custom script — is moderated through this one engine.
+//!
 //! A script decides what happens to a post through ordinary Sieve actions:
 //!
 //! - `keep;` (or doing nothing) — **approve**: distribute the post now.
@@ -36,6 +40,42 @@ use crate::error::{Error, Result};
 pub const LIST_SUBSCRIBERS: &str = "subscribers";
 pub const LIST_MEMBERS: &str = "members";
 pub const LIST_MODERATORS: &str = "moderators";
+
+/// Names of the built-in policies. These mirror the `[policy] posting` modes and are reserved:
+/// an administrator's `<name>.sieve` file may not use them. Each is itself a Sieve script (see
+/// [`BUILTIN_SCRIPTS`]), so built-in and custom policies share one evaluation path.
+pub const BUILTIN_OPEN: &str = "open";
+pub const BUILTIN_SUBSCRIBERS: &str = "subscribers";
+pub const BUILTIN_MEMBERS: &str = "members";
+pub const BUILTIN_MODERATED: &str = "moderated";
+
+/// The built-in policies, expressed as Sieve scripts, as `(name, script)` pairs.
+const BUILTIN_SCRIPTS: &[(&str, &str)] = &[
+    // Anyone may post: an empty script leaves the implicit keep in place (approve).
+    (BUILTIN_OPEN, "# open: anyone may post\n"),
+    // Subscribers post directly; anyone else is held for moderation.
+    (
+        BUILTIN_SUBSCRIBERS,
+        "require [\"extlists\", \"fileinto\"];\n\
+         if not address :list \"from\" \"subscribers\" { fileinto \"moderate\"; }\n",
+    ),
+    // Any member of the database posts directly; anyone else is held for moderation.
+    (
+        BUILTIN_MEMBERS,
+        "require [\"extlists\", \"fileinto\"];\n\
+         if not address :list \"from\" \"members\" { fileinto \"moderate\"; }\n",
+    ),
+    // Every post is held for moderation.
+    (
+        BUILTIN_MODERATED,
+        "require [\"fileinto\"];\nfileinto \"moderate\";\n",
+    ),
+];
+
+/// True if `name` is a reserved built-in policy name.
+pub fn is_builtin(name: &str) -> bool {
+    BUILTIN_SCRIPTS.iter().any(|(n, _)| *n == name)
+}
 
 /// The decision a policy reached for a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,8 +116,8 @@ pub struct PolicyEngine {
 }
 
 impl PolicyEngine {
-    /// Compile every `*.sieve` file in `dir`; the file stem is the policy name.
-    pub fn load(dir: &Path) -> Result<Self> {
+    /// An engine with only the built-in policies compiled.
+    pub fn new() -> Result<Self> {
         let mut runtime = Runtime::new();
         runtime.set_valid_ext_list(LIST_SUBSCRIBERS);
         runtime.set_valid_ext_list(LIST_MEMBERS);
@@ -85,6 +125,20 @@ impl PolicyEngine {
 
         let compiler = Compiler::new();
         let mut policies = HashMap::new();
+        for (name, script) in BUILTIN_SCRIPTS {
+            let compiled = compiler
+                .compile(script.as_bytes())
+                .map_err(|e| Error::Config(format!("compiling built-in policy `{name}`: {e}")))?;
+            policies.insert((*name).to_string(), Arc::new(compiled));
+        }
+        Ok(PolicyEngine { runtime, policies })
+    }
+
+    /// The built-in policies plus every custom `*.sieve` file in `dir` (the file stem is the
+    /// policy name). Custom policies may not reuse a built-in name.
+    pub fn load(dir: &Path) -> Result<Self> {
+        let mut engine = Self::new()?;
+        let compiler = Compiler::new();
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {
                 let path = entry?.path();
@@ -96,24 +150,33 @@ impl PolicyEngine {
                     .and_then(|s| s.to_str())
                     .unwrap_or_default()
                     .to_string();
+                if is_builtin(&name) {
+                    return Err(Error::Config(format!(
+                        "policy `{name}` ({}) uses a reserved built-in name",
+                        path.display()
+                    )));
+                }
                 let text = std::fs::read(&path)?;
                 let script = compiler.compile(&text).map_err(|e| {
                     Error::Config(format!("compiling policy {}: {e}", path.display()))
                 })?;
-                policies.insert(name, Arc::new(script));
+                engine.policies.insert(name, Arc::new(script));
             }
         }
-        Ok(PolicyEngine { runtime, policies })
+        Ok(engine)
     }
 
-    /// Whether a policy with this name has been loaded.
+    /// Whether a policy with this name exists (built-in or custom).
     pub fn contains(&self, name: &str) -> bool {
         self.policies.contains_key(name)
     }
 
-    /// Names of the loaded policies.
+    /// Names of the custom (non-built-in) policies.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.policies.keys().map(String::as_str)
+        self.policies
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !is_builtin(name))
     }
 
     /// Evaluate the named policy against a message.

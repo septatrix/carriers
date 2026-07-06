@@ -124,6 +124,18 @@ pub enum PostingPolicy {
     Moderated,
 }
 
+impl PostingPolicy {
+    /// The name of the built-in Sieve policy implementing this mode.
+    pub fn policy_name(self) -> &'static str {
+        match self {
+            PostingPolicy::Open => crate::policy::BUILTIN_OPEN,
+            PostingPolicy::Subscribers => crate::policy::BUILTIN_SUBSCRIBERS,
+            PostingPolicy::Members => crate::policy::BUILTIN_MEMBERS,
+            PostingPolicy::Moderated => crate::policy::BUILTIN_MODERATED,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Policy {
     /// Who may post, and how non-permitted posts are handled. Used when `sieve` is unset.

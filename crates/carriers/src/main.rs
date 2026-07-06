@@ -327,21 +327,19 @@ async fn moderate(config_path: &Path, cmd: ModerateCommand) -> Result<()> {
 
 fn policies(config_path: &Path) -> Result<()> {
     let config = Config::load(config_path)?;
-    match &config.policies_dir {
-        Some(dir) => {
-            let engine = PolicyEngine::load(dir)
-                .with_context(|| format!("loading Sieve policies from {}", dir.display()))?;
-            let mut names: Vec<&str> = engine.names().collect();
-            names.sort_unstable();
-            if names.is_empty() {
-                println!("(no .sieve policies in {})", dir.display());
-            } else {
-                for name in names {
-                    println!("{name}");
-                }
-            }
-        }
-        None => println!("(no policies_dir configured)"),
+    let engine = match &config.policies_dir {
+        Some(dir) => PolicyEngine::load(dir)
+            .with_context(|| format!("loading Sieve policies from {}", dir.display()))?,
+        None => PolicyEngine::new().context("compiling built-in policies")?,
+    };
+
+    println!("built-in: open, subscribers, members, moderated");
+    let mut names: Vec<&str> = engine.names().collect();
+    names.sort_unstable();
+    if names.is_empty() {
+        println!("custom:   (none)");
+    } else {
+        println!("custom:   {}", names.join(", "));
     }
     Ok(())
 }

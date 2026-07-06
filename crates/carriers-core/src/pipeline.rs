@@ -6,7 +6,7 @@ use mail_auth::MessageAuthenticator;
 use mail_parser::{HeaderName, Message, MessageParser};
 
 use crate::error::{Error, Result};
-use crate::list::{List, PostingPolicy};
+use crate::list::List;
 use crate::member::MemberProvider;
 use crate::policy::{MembershipSets, PolicyDecision, PolicyEngine};
 use crate::sign::{sign_and_seal, Ingress};
@@ -67,7 +67,7 @@ pub async fn intake(
     authenticator: &MessageAuthenticator,
     store: &Store,
     members: &dyn MemberProvider,
-    policy: Option<&PolicyEngine>,
+    policy: &PolicyEngine,
     list: &List,
     hostname: &str,
     ingress: &Ingress,
@@ -100,38 +100,20 @@ pub async fn intake(
 
     let sender = from_address(&parsed);
 
-    // A configured Sieve policy decides; otherwise fall back to the built-in posting policy.
-    let approved = if let Some(policy_name) = &list.cfg.policy.sieve {
-        let engine = policy.ok_or_else(|| {
-            Error::Config(format!(
-                "list `{}` uses sieve policy `{policy_name}` but no policies_dir is configured",
-                list.name
-            ))
-        })?;
-        let sets = membership_sets(members, &list.name).await?;
-        match engine.evaluate(policy_name, &list.name, &ingress.mail_from, raw, &sets)? {
-            PolicyDecision::Approve => true,
-            PolicyDecision::Moderate => false,
-            PolicyDecision::Reject => {
-                return Ok(Disposition::Dropped {
-                    reason: format!("rejected by policy `{policy_name}`"),
-                });
-            }
-        }
-    } else {
-        match list.cfg.policy.posting {
-            PostingPolicy::Open => true,
-            PostingPolicy::Subscribers => {
-                members
-                    .is_subscriber(&list.name, sender.as_deref().unwrap_or(""))
-                    .await?
-            }
-            PostingPolicy::Members => {
-                members
-                    .is_member(&list.name, sender.as_deref().unwrap_or(""))
-                    .await?
-            }
-            PostingPolicy::Moderated => false,
+    // Every list is moderated by a Sieve policy: either the one named in its config, or the
+    // built-in policy for its `posting` mode. Both run through the same engine.
+    let policy_name = match &list.cfg.policy.sieve {
+        Some(name) => name.as_str(),
+        None => list.cfg.policy.posting.policy_name(),
+    };
+    let sets = membership_sets(members, &list.name).await?;
+    let approved = match policy.evaluate(policy_name, &list.name, &ingress.mail_from, raw, &sets)? {
+        PolicyDecision::Approve => true,
+        PolicyDecision::Moderate => false,
+        PolicyDecision::Reject => {
+            return Ok(Disposition::Dropped {
+                reason: format!("rejected by policy `{policy_name}`"),
+            });
         }
     };
 

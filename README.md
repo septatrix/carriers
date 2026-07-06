@@ -125,6 +125,10 @@ Each list sets a `[policy] posting` mode (see [`examples/lists/dev.toml`](exampl
 | `members` | any address in the member database (a superset of subscribers — a member may post without being subscribed) | held for moderation |
 | `moderated` | nobody | held for moderation |
 
+These four modes are themselves implemented as built-in Sieve scripts and evaluated through the
+same engine as custom policies (below), so there is a single moderation code path. Their names
+are reserved — a custom `<name>.sieve` may not reuse them.
+
 Held posts wait in a per-list queue. Review them with `carriers moderate list`, inspect one with
 `carriers moderate show <id>`, then `carriers moderate approve <id>` (distributes it) or
 `carriers moderate reject <id>` (discards it). A "member" who is not a subscriber is added with
