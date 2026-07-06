@@ -147,8 +147,18 @@ subscribers / members / moderated), loop and duplicate suppression, `List-*` hea
 DKIM signing, ARC sealing, VERP envelopes, smarthost delivery, flat-file lists + SQLite
 membership (subscribers and posting-only members), key generation.
 
-Deferred: STARTTLS/implicit TLS on the listener, direct-to-MX delivery, a REST/pull member API,
-web archive, digest mode, automated bounce processing, opt-in `Subject`-prefix/footer support.
+Deferred / ideas:
+
+- STARTTLS / implicit TLS on the listener
+- direct-to-MX delivery (its own retry queue) instead of a smarthost
+- a REST / pull-based member API
+- web archive and digest mode
+- automated bounce processing
+- opt-in `Subject`-prefix / footer support
+- express moderation as **Sieve filters** rather than a fixed policy enum: custom Sieve
+  actions or flags for *auto-approve*, *moderate* and *reject* decisions, evaluated against
+  custom lists (member/poster, moderator, subscriber) so operators can script arbitrary
+  per-message routing beyond the built-in `open`/`subscribers`/`members`/`moderated` modes.
 
 ## License
 
