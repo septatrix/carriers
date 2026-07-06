@@ -31,9 +31,6 @@ algorithm = "ed25519"
 [policy]
 # Only subscribers may post.
 subscribers_only = true
-# Subject prefix such as "[dev]". Empty (default) keeps DKIM intact. A non-empty value
-# rewrites Subject and WILL break the author's DKIM signature (and DMARC for p=reject domains).
-subject_prefix = ""
 
 # Optional flat member seed file (one address per line, `#` comments). Import with
 # `carriers sync`.

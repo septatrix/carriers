@@ -110,21 +110,12 @@ pub struct Policy {
     /// Only subscribers may post to the list.
     #[serde(default = "default_true")]
     pub subscribers_only: bool,
-
-    /// Subject prefix such as `[dev]`. Empty (the default) disables it.
-    ///
-    /// WARNING: a non-empty prefix rewrites the `Subject` header, which invalidates the
-    /// author's DKIM signature and therefore breaks DMARC for `p=reject` domains. Leave it
-    /// empty to stay DMARC-safe.
-    #[serde(default)]
-    pub subject_prefix: String,
 }
 
 impl Default for Policy {
     fn default() -> Self {
         Policy {
             subscribers_only: true,
-            subject_prefix: String::new(),
         }
     }
 }
