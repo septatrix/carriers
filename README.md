@@ -30,14 +30,18 @@ crates: `mail-auth` (DKIM/SPF/DMARC/ARC), `mail-parser`, `mail-builder`, `mail-s
 
 ## Architecture
 
-```
-        inbound (LMTP/SMTP)                       outbound (per recipient, VERP)
-front MTA ──────────────▶ carriers ───────────────────────────▶ smarthost (Postfix/Exim) ──▶ subscribers
-                         │  parse → verify (SPF/DKIM/DMARC/ARC)
-                         │  policy (subscribers-only, loop, dedup)
-                         │  prepend List-* headers   (DKIM-safe)
-                         │  DKIM-sign (list domain)
-                         │  ARC-seal
+```mermaid
+flowchart LR
+    MTA[Front MTA] -->|inbound LMTP/SMTP| C
+    subgraph C[carriers]
+        direction TB
+        V[parse and verify<br/>SPF / DKIM / DMARC / ARC] --> P[policy<br/>subscribers-only, loop, dedup]
+        P --> H[prepend List-* headers<br/>DKIM-safe]
+        H --> S[DKIM-sign<br/>list domain]
+        S --> A[ARC-seal]
+    end
+    C -->|outbound per recipient, VERP| SH[smarthost<br/>Postfix / Exim]
+    SH --> Subs[subscribers]
 ```
 
 - **Ingress**: a minimal LMTP/SMTP listener meant to sit behind a front MTA on a trusted
