@@ -105,23 +105,30 @@ pub enum Algorithm {
     Ed25519,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Who may post to a list, and what happens to posts from anyone else.
+///
+/// Under `Subscribers` and `Members`, a post from a sender who is *not* permitted is held for
+/// moderation rather than dropped, so a moderator can approve it. `Moderated` holds every post.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostingPolicy {
+    /// Anyone may post; nothing is moderated (an open list).
+    Open,
+    /// Subscribers (addresses that receive the list) may post directly; others are held.
+    #[default]
+    Subscribers,
+    /// Any address recorded in the member database may post directly (a superset of
+    /// subscribers, since a member need not be subscribed to receive mail); others are held.
+    Members,
+    /// Every post is held for moderation, regardless of sender.
+    Moderated,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Policy {
-    /// Only subscribers may post to the list.
-    #[serde(default = "default_true")]
-    pub subscribers_only: bool,
-}
-
-impl Default for Policy {
-    fn default() -> Self {
-        Policy {
-            subscribers_only: true,
-        }
-    }
-}
-
-fn default_true() -> bool {
-    true
+    /// Who may post, and how non-permitted posts are handled.
+    #[serde(default)]
+    pub posting: PostingPolicy,
 }
 
 /// A loaded mailing list, with its signer and sealer constructed once at load time.

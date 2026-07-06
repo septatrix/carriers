@@ -114,20 +114,38 @@ For the **list domain** (e.g. `lists.example.org`):
 The RSA `p=` value is emitted as X.509 SubjectPublicKeyInfo (SPKI), the form Google/Microsoft
 expect.
 
+## Posting policy and moderation
+
+Each list sets a `[policy] posting` mode (see [`examples/lists/dev.toml`](examples/lists/dev.toml)):
+
+| Mode | Who may post directly | Everyone else |
+| --- | --- | --- |
+| `open` | anyone | — |
+| `subscribers` (default) | subscribers (receive the list) | held for moderation |
+| `members` | any address in the member database (a superset of subscribers — a member may post without being subscribed) | held for moderation |
+| `moderated` | nobody | held for moderation |
+
+Held posts wait in a per-list queue. Review them with `carriers moderate list`, inspect one with
+`carriers moderate show <id>`, then `carriers moderate approve <id>` (distributes it) or
+`carriers moderate reject <id>` (discards it). A "member" who is not a subscriber is added with
+`carriers member add <list> <address> --posting-only`.
+
 ## CLI
 
 | Command | Description |
 | --- | --- |
 | `carriers run` | Run the ingress listener and distribute posts. |
 | `carriers genkey` | Generate a DKIM/ARC key pair and print the DNS record. |
-| `carriers member add\|remove\|list <list> [address]` | Manage subscribers. |
+| `carriers member add\|remove\|list <list> [address] [--posting-only]` | Manage members and subscribers. |
+| `carriers moderate list\|show\|approve\|reject [id]` | Review and act on held messages. |
 | `carriers sync` | Import each list's flat `members_file` into SQLite. |
 
 ## Status / roadmap
 
-Implemented: LMTP/SMTP ingress, subscribers-only posting, loop and duplicate suppression,
-`List-*` headers, aligned DKIM signing, ARC sealing, VERP envelopes, smarthost delivery,
-flat-file lists + SQLite membership, key generation.
+Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (open /
+subscribers / members / moderated), loop and duplicate suppression, `List-*` headers, aligned
+DKIM signing, ARC sealing, VERP envelopes, smarthost delivery, flat-file lists + SQLite
+membership (subscribers and posting-only members), key generation.
 
 Deferred: STARTTLS/implicit TLS on the listener, direct-to-MX delivery, a REST/pull member API,
 web archive, digest mode, automated bounce processing, opt-in `Subject`-prefix/footer support.

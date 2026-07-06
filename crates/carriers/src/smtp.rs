@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 
 use carriers_core::config::Protocol;
 use carriers_core::list::List;
-use carriers_core::pipeline::{self, Prepared};
+use carriers_core::pipeline::{self, Disposition};
 use carriers_core::sign::Ingress;
 use carriers_core::Error as CoreError;
 
@@ -200,17 +200,21 @@ async fn process(
 ) -> Vec<String> {
     let mut replies = Vec::with_capacity(recipients.len());
     for list in recipients {
-        let reply = match prepare_and_deliver(state, list, ingress, raw).await {
-            Ok(count) => {
+        let reply = match handle_one(state, list, ingress, raw).await {
+            Ok(Outcome::Distributed(count)) => {
                 info!(list = %list.name, recipients = count, "distributed message");
                 "250 2.6.0 Message accepted\r\n".to_string()
             }
-            Err(PipelineError::Rejected(reason)) => {
-                // Accept-and-drop: replying 2xx avoids generating backscatter for policy drops.
-                info!(list = %list.name, reason, "message dropped by policy");
+            Ok(Outcome::Held(id)) => {
+                info!(list = %list.name, id, "message held for moderation");
+                "250 2.6.0 Message accepted (held for moderation)\r\n".to_string()
+            }
+            Ok(Outcome::Dropped(reason)) => {
+                // Accept-and-drop: replying 2xx avoids generating backscatter.
+                info!(list = %list.name, reason, "message dropped");
                 "250 2.6.0 Message accepted (not distributed)\r\n".to_string()
             }
-            Err(PipelineError::Failed(err)) => {
+            Err(err) => {
                 error!(list = %list.name, %err, "processing failed");
                 "451 4.3.0 Temporary processing failure\r\n".to_string()
             }
@@ -220,18 +224,19 @@ async fn process(
     replies
 }
 
-enum PipelineError {
-    Rejected(String),
-    Failed(anyhow::Error),
+enum Outcome {
+    Distributed(usize),
+    Held(i64),
+    Dropped(String),
 }
 
-async fn prepare_and_deliver(
+async fn handle_one(
     state: &Arc<AppState>,
     list: &Arc<List>,
     ingress: &Ingress,
     raw: &[u8],
-) -> std::result::Result<usize, PipelineError> {
-    let prepared: Prepared = pipeline::prepare(
+) -> anyhow::Result<Outcome> {
+    let disposition = match pipeline::intake(
         &state.authenticator,
         &state.store,
         state.members.as_ref(),
@@ -241,14 +246,41 @@ async fn prepare_and_deliver(
         raw,
     )
     .await
-    .map_err(|e| match e {
-        CoreError::Rejected(reason) => PipelineError::Rejected(reason),
-        other => PipelineError::Failed(other.into()),
-    })?;
+    {
+        Ok(disposition) => disposition,
+        // An unparseable message surfaces as Rejected; accept-and-drop it.
+        Err(CoreError::Rejected(reason)) => return Ok(Outcome::Dropped(reason)),
+        Err(other) => return Err(other.into()),
+    };
 
-    deliver(&state.config.smarthost, &prepared)
-        .await
-        .map_err(PipelineError::Failed)
+    match disposition {
+        Disposition::Distribute(prepared) => {
+            let count = deliver(&state.config.smarthost, &prepared).await?;
+            Ok(Outcome::Distributed(count))
+        }
+        Disposition::Held { id } => Ok(Outcome::Held(id)),
+        Disposition::Dropped { reason } => Ok(Outcome::Dropped(reason)),
+    }
+}
+
+/// Distribute a message a moderator has approved.
+pub async fn distribute_approved(
+    state: &Arc<AppState>,
+    list: &Arc<List>,
+    ingress: &Ingress,
+    raw: &[u8],
+) -> anyhow::Result<usize> {
+    let prepared = pipeline::finalize(
+        &state.authenticator,
+        state.members.as_ref(),
+        list,
+        &state.config.hostname,
+        ingress,
+        raw,
+    )
+    .await?;
+    let count = deliver(&state.config.smarthost, &prepared).await?;
+    Ok(count)
 }
 
 /// Read the DATA payload, terminated by `<CRLF>.<CRLF>`, performing dot-unstuffing.

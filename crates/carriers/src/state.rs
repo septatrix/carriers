@@ -48,6 +48,11 @@ impl AppState {
     pub fn list_for_address(&self, address: &str) -> Option<&Arc<List>> {
         self.lists.get(&address.trim().to_ascii_lowercase())
     }
+
+    /// Find a loaded list by its short name (the `<name>.toml` stem).
+    pub fn list_by_name(&self, name: &str) -> Option<&Arc<List>> {
+        self.lists.values().find(|list| list.name == name)
+    }
 }
 
 /// Load every `<name>.toml` from the configured lists directory.

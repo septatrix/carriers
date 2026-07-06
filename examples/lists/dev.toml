@@ -29,8 +29,14 @@ key_file = "/etc/carriers/keys/dev.arc.pem"
 algorithm = "ed25519"
 
 [policy]
-# Only subscribers may post.
-subscribers_only = true
+# Who may post, and what happens to everyone else's posts:
+#   "open"        - anyone may post; nothing is moderated
+#   "subscribers" - subscribers post directly; other senders are held for moderation (default)
+#   "members"     - any address in the member database posts directly (a superset of
+#                   subscribers, since a member need not be subscribed); others are held
+#   "moderated"   - every post is held for moderation
+# Held posts wait in a queue; review them with `carriers moderate`.
+posting = "subscribers"
 
 # Optional flat member seed file (one address per line, `#` comments). Import with
 # `carriers sync`.

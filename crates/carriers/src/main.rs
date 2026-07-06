@@ -4,16 +4,19 @@ mod deliver;
 mod smtp;
 mod state;
 
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use carriers_core::config::Config;
 use carriers_core::keygen;
 use carriers_core::list::{Algorithm, List};
 use carriers_core::member::{MemberProvider, SqliteMemberProvider};
+use carriers_core::sign::Ingress;
 use carriers_core::store::Store;
 
 use crate::state::{load_lists, AppState};
@@ -46,9 +49,12 @@ enum Command {
     Genkey(GenkeyArgs),
     /// Import the flat member seed file(s) into the database.
     Sync,
-    /// Manage subscribers.
+    /// Manage subscribers and members.
     #[command(subcommand)]
     Member(MemberCommand),
+    /// Review and act on messages held for moderation.
+    #[command(subcommand)]
+    Moderate(ModerateCommand),
 }
 
 #[derive(Args)]
@@ -87,12 +93,30 @@ impl From<KeyAlg> for Algorithm {
 
 #[derive(Subcommand)]
 enum MemberCommand {
-    /// Add a subscriber to a list.
-    Add { list: String, address: String },
-    /// Remove a subscriber from a list.
+    /// Add a member to a list (a subscriber by default).
+    Add {
+        list: String,
+        address: String,
+        /// Add as a posting-only member (may post but does not receive the list).
+        #[arg(long)]
+        posting_only: bool,
+    },
+    /// Remove a member from a list.
     Remove { list: String, address: String },
-    /// List subscribers of a list.
+    /// List members of a list and their roles.
     List { list: String },
+}
+
+#[derive(Subcommand)]
+enum ModerateCommand {
+    /// List messages held for moderation (optionally for a single list).
+    List { list: Option<String> },
+    /// Print the raw held message to stdout.
+    Show { id: i64 },
+    /// Approve a held message and distribute it.
+    Approve { id: i64 },
+    /// Reject (discard) a held message.
+    Reject { id: i64 },
 }
 
 #[tokio::main]
@@ -110,6 +134,7 @@ async fn main() -> Result<()> {
         Command::Genkey(args) => genkey(args),
         Command::Sync => sync(&cli.config).await,
         Command::Member(cmd) => member(&cli.config, cmd).await,
+        Command::Moderate(cmd) => moderate(&cli.config, cmd).await,
     }
 }
 
@@ -179,18 +204,88 @@ async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
     let store = open_store(&config).await?;
     let provider = SqliteMemberProvider::new(store);
     match cmd {
-        MemberCommand::Add { list, address } => {
+        MemberCommand::Add {
+            list,
+            address,
+            posting_only,
+        } => {
             resolve_list_name(&config, &list)?;
-            provider.add(&list, &address).await?;
-            println!("added {address} to {list}");
+            provider.add(&list, &address, !posting_only).await?;
+            let role = if posting_only { "poster" } else { "subscriber" };
+            println!("added {address} to {list} ({role})");
         }
         MemberCommand::Remove { list, address } => {
             provider.remove(&list, &address).await?;
             println!("removed {address} from {list}");
         }
         MemberCommand::List { list } => {
-            for address in provider.recipients(&list).await? {
-                println!("{address}");
+            for member in provider.members(&list).await? {
+                let role = if member.subscribed {
+                    "subscriber"
+                } else {
+                    "poster"
+                };
+                println!("{}\t{role}", member.address);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn moderate(config_path: &Path, cmd: ModerateCommand) -> Result<()> {
+    let config = Config::load(config_path)?;
+    match cmd {
+        ModerateCommand::List { list } => {
+            let store = open_store(&config).await?;
+            for held in store.held_messages(list.as_deref()).await? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    held.id,
+                    held.list,
+                    held.sender.as_deref().unwrap_or("-"),
+                    held.subject.as_deref().unwrap_or("(no subject)"),
+                );
+            }
+        }
+        ModerateCommand::Show { id } => {
+            let store = open_store(&config).await?;
+            let held = store
+                .get_held(id)
+                .await?
+                .with_context(|| format!("no held message with id {id}"))?;
+            std::io::stdout().write_all(&held.raw)?;
+        }
+        ModerateCommand::Approve { id } => {
+            let state = Arc::new(AppState::load(config).await?);
+            let held = state
+                .store
+                .get_held(id)
+                .await?
+                .with_context(|| format!("no held message with id {id}"))?;
+            let list = state
+                .list_by_name(&held.list)
+                .with_context(|| {
+                    format!("list `{}` for held message {id} is not loaded", held.list)
+                })?
+                .clone();
+            let ingress = Ingress {
+                remote_ip: held
+                    .remote_ip
+                    .parse()
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                helo: held.helo,
+                mail_from: held.mail_from,
+            };
+            let count = smtp::distribute_approved(&state, &list, &ingress, &held.raw).await?;
+            state.store.delete_held(id).await?;
+            println!("approved {id}: distributed to {count} recipient(s)");
+        }
+        ModerateCommand::Reject { id } => {
+            let store = open_store(&config).await?;
+            if store.delete_held(id).await? {
+                println!("rejected {id}");
+            } else {
+                bail!("no held message with id {id}");
             }
         }
     }
