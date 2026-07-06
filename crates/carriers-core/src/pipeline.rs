@@ -1,11 +1,14 @@
 //! The message-processing pipeline: policy checks, moderation, transformation, and signing.
 
+use std::collections::HashSet;
+
 use mail_auth::MessageAuthenticator;
 use mail_parser::{HeaderName, Message, MessageParser};
 
 use crate::error::{Error, Result};
 use crate::list::{List, PostingPolicy};
 use crate::member::MemberProvider;
+use crate::policy::{MembershipSets, PolicyDecision, PolicyEngine};
 use crate::sign::{sign_and_seal, Ingress};
 use crate::store::Store;
 use crate::transform::augment;
@@ -59,10 +62,12 @@ pub fn decode_verp(address: &str) -> Option<(String, String)> {
 
 /// Ingest an inbound post: reject loops/duplicates, apply the posting policy (distributing,
 /// holding for moderation, as appropriate), and prepare the message when it may go out now.
+#[allow(clippy::too_many_arguments)]
 pub async fn intake(
     authenticator: &MessageAuthenticator,
     store: &Store,
     members: &dyn MemberProvider,
+    policy: Option<&PolicyEngine>,
     list: &List,
     hostname: &str,
     ingress: &Ingress,
@@ -95,27 +100,45 @@ pub async fn intake(
 
     let sender = from_address(&parsed);
 
-    // Decide whether this sender may post without moderation.
-    let may_post = match list.cfg.policy.posting {
-        PostingPolicy::Open => true,
-        PostingPolicy::Subscribers => {
-            members
-                .is_subscriber(&list.name, sender.as_deref().unwrap_or(""))
-                .await?
+    // A configured Sieve policy decides; otherwise fall back to the built-in posting policy.
+    let approved = if let Some(policy_name) = &list.cfg.policy.sieve {
+        let engine = policy.ok_or_else(|| {
+            Error::Config(format!(
+                "list `{}` uses sieve policy `{policy_name}` but no policies_dir is configured",
+                list.name
+            ))
+        })?;
+        let sets = membership_sets(members, &list.name).await?;
+        match engine.evaluate(policy_name, &list.name, &ingress.mail_from, raw, &sets)? {
+            PolicyDecision::Approve => true,
+            PolicyDecision::Moderate => false,
+            PolicyDecision::Reject => {
+                return Ok(Disposition::Dropped {
+                    reason: format!("rejected by policy `{policy_name}`"),
+                });
+            }
         }
-        PostingPolicy::Members => {
-            members
-                .is_member(&list.name, sender.as_deref().unwrap_or(""))
-                .await?
+    } else {
+        match list.cfg.policy.posting {
+            PostingPolicy::Open => true,
+            PostingPolicy::Subscribers => {
+                members
+                    .is_subscriber(&list.name, sender.as_deref().unwrap_or(""))
+                    .await?
+            }
+            PostingPolicy::Members => {
+                members
+                    .is_member(&list.name, sender.as_deref().unwrap_or(""))
+                    .await?
+            }
+            PostingPolicy::Moderated => false,
         }
-        PostingPolicy::Moderated => false,
     };
 
-    if may_post {
+    if approved {
         let prepared = finalize(authenticator, members, list, hostname, ingress, raw).await?;
         Ok(Disposition::Distribute(prepared))
     } else {
-        let subject = parsed.subject();
         let id = store
             .enqueue_held(
                 &list.name,
@@ -123,12 +146,31 @@ pub async fn intake(
                 &ingress.helo,
                 &ingress.remote_ip.to_string(),
                 sender.as_deref(),
-                subject,
+                parsed.subject(),
                 raw,
             )
             .await?;
         Ok(Disposition::Held { id })
     }
+}
+
+/// Build the membership sets exposed to Sieve policies for `list_name`.
+async fn membership_sets(members: &dyn MemberProvider, list_name: &str) -> Result<MembershipSets> {
+    let mut sets = MembershipSets {
+        subscribers: HashSet::new(),
+        members: HashSet::new(),
+        moderators: HashSet::new(),
+    };
+    for member in members.members(list_name).await? {
+        if member.subscribed {
+            sets.subscribers.insert(member.address.clone());
+        }
+        if member.moderator {
+            sets.moderators.insert(member.address.clone());
+        }
+        sets.members.insert(member.address);
+    }
+    Ok(sets)
 }
 
 /// Transform, sign and seal a message and gather its recipients, without any policy check.

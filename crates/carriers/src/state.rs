@@ -9,6 +9,7 @@ use tracing::info;
 use carriers_core::config::Config;
 use carriers_core::list::List;
 use carriers_core::member::{MemberProvider, SqliteMemberProvider};
+use carriers_core::policy::PolicyEngine;
 use carriers_core::store::Store;
 use carriers_core::MessageAuthenticator;
 
@@ -17,6 +18,8 @@ pub struct AppState {
     pub authenticator: MessageAuthenticator,
     pub store: Arc<Store>,
     pub members: Arc<dyn MemberProvider>,
+    /// Compiled Sieve moderation policies, if a policies directory is configured.
+    pub policy: Option<PolicyEngine>,
     /// Lists keyed by their lowercased posting address.
     pub lists: HashMap<String, Arc<List>>,
 }
@@ -32,14 +35,26 @@ impl AppState {
         let authenticator = MessageAuthenticator::new_system_conf()
             .context("initialising DNS resolver from system configuration")?;
 
+        let policy = match &config.policies_dir {
+            Some(dir) => {
+                let engine = PolicyEngine::load(dir)
+                    .with_context(|| format!("loading Sieve policies from {}", dir.display()))?;
+                info!(count = engine.names().count(), "loaded Sieve policies");
+                Some(engine)
+            }
+            None => None,
+        };
+
         let lists = load_lists(&config)?;
         info!(count = lists.len(), "loaded lists");
+        validate_policies(&lists, policy.as_ref())?;
 
         Ok(AppState {
             config,
             authenticator,
             store,
             members,
+            policy,
             lists,
         })
     }
@@ -53,6 +68,29 @@ impl AppState {
     pub fn list_by_name(&self, name: &str) -> Option<&Arc<List>> {
         self.lists.values().find(|list| list.name == name)
     }
+}
+
+/// Fail fast if a list references a Sieve policy that was not loaded.
+fn validate_policies(
+    lists: &HashMap<String, Arc<List>>,
+    policy: Option<&PolicyEngine>,
+) -> Result<()> {
+    for list in lists.values() {
+        if let Some(name) = &list.cfg.policy.sieve {
+            match policy {
+                Some(engine) if engine.contains(name) => {}
+                Some(_) => anyhow::bail!(
+                    "list `{}` references unknown Sieve policy `{name}`",
+                    list.name
+                ),
+                None => anyhow::bail!(
+                    "list `{}` references Sieve policy `{name}` but no policies_dir is configured",
+                    list.name
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Load every `<name>.toml` from the configured lists directory.

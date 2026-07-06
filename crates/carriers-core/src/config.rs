@@ -29,6 +29,11 @@ pub struct Config {
     /// Directory containing per-list `<name>.toml` files.
     pub lists_dir: PathBuf,
 
+    /// Directory of Sieve moderation policies (`<name>.sieve`). Required only if any list
+    /// selects a `[policy] sieve` script.
+    #[serde(default)]
+    pub policies_dir: Option<PathBuf>,
+
     /// Bounce-handling thresholds.
     #[serde(default)]
     pub bounce: BounceConfig,

@@ -38,6 +38,10 @@ algorithm = "ed25519"
 # Held posts wait in a queue; review them with `carriers moderate`.
 posting = "subscribers"
 
+# Alternatively, drive moderation with a Sieve policy (a `<name>.sieve` file in policies_dir).
+# When set, `sieve` takes precedence over `posting`. See examples/policies/.
+# sieve = "moderated-members"
+
 # Optional flat member seed file (one address per line, `#` comments). Import with
 # `carriers sync`.
 # members_file = "/var/lib/carriers/lists/dev/members"

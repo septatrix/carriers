@@ -12,10 +12,13 @@ async fn subscribers_and_posting_only_members() {
 
     // A subscriber (receives + is a member) and a posting-only member (member, not subscriber).
     provider
-        .add("dev", "Alice@Example.com", true)
+        .add("dev", "Alice@Example.com", true, false)
         .await
         .unwrap();
-    provider.add("dev", "bot@example.net", false).await.unwrap();
+    provider
+        .add("dev", "bot@example.net", false, false)
+        .await
+        .unwrap();
 
     // Both are members; only alice is a subscriber / recipient.
     assert!(provider
@@ -37,7 +40,10 @@ async fn subscribers_and_posting_only_members() {
     );
 
     // Re-adding with a different role updates it (idempotent upsert).
-    provider.add("dev", "bot@example.net", true).await.unwrap();
+    provider
+        .add("dev", "bot@example.net", true, false)
+        .await
+        .unwrap();
     assert!(provider
         .is_subscriber("dev", "bot@example.net")
         .await
@@ -70,7 +76,7 @@ async fn record_message_deduplicates() {
 async fn bounces_disable_delivery_then_enable_restores_it() {
     let store = Store::open_in_memory().await.unwrap();
     store
-        .add_member("dev", "alice@example.com", true)
+        .add_member("dev", "alice@example.com", true, false)
         .await
         .unwrap();
 

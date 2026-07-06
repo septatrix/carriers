@@ -126,9 +126,14 @@ pub enum PostingPolicy {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Policy {
-    /// Who may post, and how non-permitted posts are handled.
+    /// Who may post, and how non-permitted posts are handled. Used when `sieve` is unset.
     #[serde(default)]
     pub posting: PostingPolicy,
+
+    /// Name of a Sieve moderation policy (a `<name>.sieve` file in `policies_dir`). When set,
+    /// it decides approve/moderate/reject and takes precedence over `posting`.
+    #[serde(default)]
+    pub sieve: Option<String>,
 }
 
 /// A loaded mailing list, with its signer and sealer constructed once at load time.

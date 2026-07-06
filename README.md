@@ -130,6 +130,33 @@ Held posts wait in a per-list queue. Review them with `carriers moderate list`, 
 `carriers moderate reject <id>` (discards it). A "member" who is not a subscriber is added with
 `carriers member add <list> <address> --posting-only`.
 
+### Sieve policies
+
+For richer rules, a list can delegate the decision to a **Sieve** script instead of the
+built-in modes: set `[policy] sieve = "<name>"`, where `<name>.sieve` is a file the administrator
+places in `policies_dir` (see [`examples/policies/`](examples/policies/)). Policies are global
+and static — compiled once at startup — and take precedence over `posting`. The script decides
+with ordinary Sieve actions:
+
+- `keep;` (or an empty script) — **approve** and distribute now
+- `fileinto "moderate";` — **hold** for moderation
+- `discard;` / `reject "…";` — **reject** (drop)
+
+Membership is exposed as Sieve external lists, resolved against the *current* list, so one
+global script adapts per mailing list: `subscribers`, `members` (a superset), and `moderators`
+(set with `carriers member add … --moderator`). The list's short name is available as the
+`vnd.carriers.list` environment variable. `carriers policies` lists the compiled policies.
+
+```sieve
+require ["envelope", "extlists", "fileinto"];
+if address :list "from" "subscribers" { keep; }
+elsif address :list "from" "members"  { fileinto "moderate"; }
+else                                  { discard; }
+```
+
+> Note: the Sieve engine ([`sieve-rs`](https://github.com/stalwartlabs/sieve)) is AGPL-3.0, so
+> building carriers with policy support links AGPL code into the binary.
+
 ## Bounce handling
 
 Every delivered copy carries a per-recipient VERP return path
@@ -148,17 +175,18 @@ address is disabled — it is skipped as a recipient — until an operator runs
 | --- | --- |
 | `carriers run` | Run the ingress listener and distribute posts. |
 | `carriers genkey` | Generate a DKIM/ARC key pair and print the DNS record. |
-| `carriers member add\|remove\|list\|enable <list> [address] [--posting-only]` | Manage members; `enable` clears bounce state. |
+| `carriers member add\|remove\|list\|enable <list> [address] [--posting-only] [--moderator]` | Manage members; `enable` clears bounce state. |
 | `carriers moderate list\|show\|approve\|reject [id]` | Review and act on held messages. |
+| `carriers policies` | List the compiled Sieve moderation policies. |
 | `carriers sync` | Import each list's flat `members_file` into SQLite. |
 
 ## Status / roadmap
 
-Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (open /
-subscribers / members / moderated), VERP bounce processing with automatic delivery disabling,
-loop and duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost
-delivery, flat-file lists + SQLite membership (subscribers and posting-only members), key
-generation.
+Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
+open / subscribers / members / moderated modes, or a Sieve script), VERP bounce processing with
+automatic delivery disabling, loop and duplicate suppression, `List-*` headers, aligned DKIM
+signing, ARC sealing, smarthost delivery, flat-file lists + SQLite membership (subscribers,
+posting-only members, and moderators), key generation.
 
 Deferred / ideas:
 
@@ -167,10 +195,8 @@ Deferred / ideas:
 - a REST / pull-based member API
 - web archive and digest mode
 - opt-in `Subject`-prefix / footer support
-- express moderation as **Sieve filters** rather than a fixed policy enum: custom Sieve
-  actions or flags for *auto-approve*, *moderate* and *reject* decisions, evaluated against
-  custom lists (member/poster, moderator, subscriber) so operators can script arbitrary
-  per-message routing beyond the built-in `open`/`subscribers`/`members`/`moderated` modes.
+- per-list (rather than global) Sieve policies, and richer policy context (spam/DKIM results,
+  message size) exposed to scripts
 
 ## License
 

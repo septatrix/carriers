@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS members (
     address         TEXT NOT NULL,
     -- 1 = subscriber (receives the list); 0 = member who may post but does not receive.
     subscribed      INTEGER NOT NULL DEFAULT 1,
+    -- 1 = a moderator of the list (exposed to Sieve policies as the `moderators` list).
+    moderator       INTEGER NOT NULL DEFAULT 0,
     -- Running bounce score; when it reaches the configured threshold, delivery is disabled.
     bounce_score    REAL NOT NULL DEFAULT 0,
     bounce_disabled INTEGER NOT NULL DEFAULT 0,
@@ -38,11 +40,13 @@ CREATE TABLE IF NOT EXISTS moderation_queue (
 );
 ";
 
-/// A member of a list, with their subscription and bounce state.
+/// A member of a list, with their roles and bounce state.
 pub struct Member {
     pub address: String,
     /// True if the member receives the list (a subscriber).
     pub subscribed: bool,
+    /// True if the member is a moderator of the list.
+    pub moderator: bool,
     /// Running bounce score.
     pub bounce_score: f64,
     /// True if delivery has been disabled due to bounces.
@@ -53,6 +57,7 @@ pub struct Member {
 /// columns. Errors (e.g. "duplicate column") are ignored.
 const MIGRATIONS: &[&str] = &[
     "ALTER TABLE members ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE members ADD COLUMN moderator INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE members ADD COLUMN bounce_score REAL NOT NULL DEFAULT 0",
     "ALTER TABLE members ADD COLUMN bounce_disabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE members ADD COLUMN last_bounce_at INTEGER",
@@ -69,6 +74,9 @@ pub struct HeldSummary {
 
 /// Row shape returned by the moderation-queue summary query.
 type HeldRow = (i64, String, Option<String>, Option<String>, i64);
+
+/// Row shape returned by the member query: (address, subscribed, moderator, score, disabled).
+type MemberRow = (String, i64, i64, f64, i64);
 
 /// A full held message, including everything needed to distribute it on approval.
 pub struct HeldMessage {
@@ -119,15 +127,24 @@ impl Store {
 
     // --- Membership ---------------------------------------------------------------------
 
-    /// Add a member. `subscribed` marks whether they also receive the list.
-    pub async fn add_member(&self, list: &str, address: &str, subscribed: bool) -> Result<()> {
+    /// Add a member. `subscribed` marks whether they receive the list; `moderator` marks the
+    /// moderator role. Re-adding updates both roles.
+    pub async fn add_member(
+        &self,
+        list: &str,
+        address: &str,
+        subscribed: bool,
+        moderator: bool,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO members(list, address, subscribed) VALUES(?, ?, ?) \
-             ON CONFLICT(list, address) DO UPDATE SET subscribed = excluded.subscribed",
+            "INSERT INTO members(list, address, subscribed, moderator) VALUES(?, ?, ?, ?) \
+             ON CONFLICT(list, address) DO UPDATE SET \
+                 subscribed = excluded.subscribed, moderator = excluded.moderator",
         )
         .bind(list)
         .bind(address.trim().to_ascii_lowercase())
         .bind(subscribed as i64)
+        .bind(moderator as i64)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -177,10 +194,10 @@ impl Store {
         Ok(rows)
     }
 
-    /// All members of the list with their subscription and bounce state.
+    /// All members of the list with their roles and bounce state.
     pub async fn all_members(&self, list: &str) -> Result<Vec<Member>> {
-        let rows: Vec<(String, i64, f64, i64)> = sqlx::query_as(
-            "SELECT address, subscribed, bounce_score, bounce_disabled \
+        let rows: Vec<MemberRow> = sqlx::query_as(
+            "SELECT address, subscribed, moderator, bounce_score, bounce_disabled \
              FROM members WHERE list = ? ORDER BY address",
         )
         .bind(list)
@@ -189,9 +206,10 @@ impl Store {
         Ok(rows
             .into_iter()
             .map(
-                |(address, subscribed, bounce_score, bounce_disabled)| Member {
+                |(address, subscribed, moderator, bounce_score, bounce_disabled)| Member {
                     address,
                     subscribed: subscribed != 0,
+                    moderator: moderator != 0,
                     bounce_score,
                     bounce_disabled: bounce_disabled != 0,
                 },

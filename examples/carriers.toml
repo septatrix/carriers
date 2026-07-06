@@ -18,6 +18,10 @@ db_path = "/var/lib/carriers/carriers.db"
 # Directory of per-list `<name>.toml` files.
 lists_dir = "/etc/carriers/lists"
 
+# Directory of Sieve moderation policies (`<name>.sieve`). Only needed if a list selects a
+# `[policy] sieve` script. Each file's name (without extension) is the policy name.
+policies_dir = "/etc/carriers/policies"
+
 [smarthost]
 # Outbound copies are relayed here. A local MTA (Postfix/Exim) is the intended target: it
 # owns queueing, retries, MX resolution and outbound TLS.

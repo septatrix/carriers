@@ -14,6 +14,7 @@ pub mod keygen;
 pub mod list;
 pub mod member;
 pub mod pipeline;
+pub mod policy;
 pub mod sign;
 pub mod store;
 pub mod transform;

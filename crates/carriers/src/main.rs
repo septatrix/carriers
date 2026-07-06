@@ -16,6 +16,7 @@ use carriers_core::config::Config;
 use carriers_core::keygen;
 use carriers_core::list::{Algorithm, List};
 use carriers_core::member::{MemberProvider, SqliteMemberProvider};
+use carriers_core::policy::PolicyEngine;
 use carriers_core::sign::Ingress;
 use carriers_core::store::Store;
 
@@ -55,6 +56,8 @@ enum Command {
     /// Review and act on messages held for moderation.
     #[command(subcommand)]
     Moderate(ModerateCommand),
+    /// List the loaded Sieve moderation policies.
+    Policies,
 }
 
 #[derive(Args)]
@@ -100,6 +103,9 @@ enum MemberCommand {
         /// Add as a posting-only member (may post but does not receive the list).
         #[arg(long)]
         posting_only: bool,
+        /// Grant the moderator role (exposed to Sieve policies as the `moderators` list).
+        #[arg(long)]
+        moderator: bool,
     },
     /// Remove a member from a list.
     Remove { list: String, address: String },
@@ -137,6 +143,7 @@ async fn main() -> Result<()> {
         Command::Sync => sync(&cli.config).await,
         Command::Member(cmd) => member(&cli.config, cmd).await,
         Command::Moderate(cmd) => moderate(&cli.config, cmd).await,
+        Command::Policies => policies(&cli.config),
     }
 }
 
@@ -210,11 +217,17 @@ async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
             list,
             address,
             posting_only,
+            moderator,
         } => {
             resolve_list_name(&config, &list)?;
-            provider.add(&list, &address, !posting_only).await?;
-            let role = if posting_only { "poster" } else { "subscriber" };
-            println!("added {address} to {list} ({role})");
+            provider
+                .add(&list, &address, !posting_only, moderator)
+                .await?;
+            let mut roles = vec![if posting_only { "poster" } else { "subscriber" }];
+            if moderator {
+                roles.push("moderator");
+            }
+            println!("added {address} to {list} ({})", roles.join(", "));
         }
         MemberCommand::Remove { list, address } => {
             provider.remove(&list, &address).await?;
@@ -222,11 +235,15 @@ async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
         }
         MemberCommand::List { list } => {
             for member in provider.members(&list).await? {
-                let role = if member.subscribed {
+                let mut roles = vec![if member.subscribed {
                     "subscriber"
                 } else {
                     "poster"
-                };
+                }];
+                if member.moderator {
+                    roles.push("moderator");
+                }
+                let role = roles.join(", ");
                 let status = if member.bounce_disabled {
                     format!(" [bounce-disabled score={:.1}]", member.bounce_score)
                 } else if member.bounce_score > 0.0 {
@@ -304,6 +321,27 @@ async fn moderate(config_path: &Path, cmd: ModerateCommand) -> Result<()> {
                 bail!("no held message with id {id}");
             }
         }
+    }
+    Ok(())
+}
+
+fn policies(config_path: &Path) -> Result<()> {
+    let config = Config::load(config_path)?;
+    match &config.policies_dir {
+        Some(dir) => {
+            let engine = PolicyEngine::load(dir)
+                .with_context(|| format!("loading Sieve policies from {}", dir.display()))?;
+            let mut names: Vec<&str> = engine.names().collect();
+            names.sort_unstable();
+            if names.is_empty() {
+                println!("(no .sieve policies in {})", dir.display());
+            } else {
+                for name in names {
+                    println!("{name}");
+                }
+            }
+        }
+        None => println!("(no policies_dir configured)"),
     }
     Ok(())
 }

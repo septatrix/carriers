@@ -318,6 +318,7 @@ async fn handle_one(
         &state.authenticator,
         &state.store,
         state.members.as_ref(),
+        state.policy.as_ref(),
         list,
         &state.config.hostname,
         ingress,

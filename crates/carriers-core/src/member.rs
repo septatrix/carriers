@@ -26,8 +26,9 @@ pub trait MemberProvider: Send + Sync {
     async fn is_subscriber(&self, list: &str, address: &str) -> Result<bool>;
     /// Subscriber addresses to deliver to.
     async fn recipients(&self, list: &str) -> Result<Vec<String>>;
-    /// Add a member; `subscribed` marks whether they also receive the list.
-    async fn add(&self, list: &str, address: &str, subscribed: bool) -> Result<()>;
+    /// Add a member; `subscribed` marks whether they receive the list, `moderator` the role.
+    async fn add(&self, list: &str, address: &str, subscribed: bool, moderator: bool)
+        -> Result<()>;
     async fn remove(&self, list: &str, address: &str) -> Result<()>;
     /// All members with their subscription state.
     async fn members(&self, list: &str) -> Result<Vec<Member>>;
@@ -52,7 +53,7 @@ impl SqliteMemberProvider {
             if addr.is_empty() || addr.starts_with('#') {
                 continue;
             }
-            self.store.add_member(list, addr, true).await?;
+            self.store.add_member(list, addr, true, false).await?;
             n += 1;
         }
         Ok(n)
@@ -70,8 +71,16 @@ impl MemberProvider for SqliteMemberProvider {
     async fn recipients(&self, list: &str) -> Result<Vec<String>> {
         self.store.subscribers(list).await
     }
-    async fn add(&self, list: &str, address: &str, subscribed: bool) -> Result<()> {
-        self.store.add_member(list, address, subscribed).await
+    async fn add(
+        &self,
+        list: &str,
+        address: &str,
+        subscribed: bool,
+        moderator: bool,
+    ) -> Result<()> {
+        self.store
+            .add_member(list, address, subscribed, moderator)
+            .await
     }
     async fn remove(&self, list: &str, address: &str) -> Result<()> {
         self.store.remove_member(list, address).await
