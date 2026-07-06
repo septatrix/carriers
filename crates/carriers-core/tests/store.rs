@@ -67,6 +67,68 @@ async fn record_message_deduplicates() {
 }
 
 #[tokio::test]
+async fn bounces_disable_delivery_then_enable_restores_it() {
+    let store = Store::open_in_memory().await.unwrap();
+    store
+        .add_member("dev", "alice@example.com", true)
+        .await
+        .unwrap();
+
+    // threshold 5.0, hard weight 3.0: one hard bounce is below threshold, two crosses it.
+    assert_eq!(
+        store
+            .record_bounce("dev", "alice@example.com", 3.0, 5.0)
+            .await
+            .unwrap(),
+        Some(false),
+        "first hard bounce does not yet disable"
+    );
+    assert!(
+        store
+            .subscribers("dev")
+            .await
+            .unwrap()
+            .contains(&"alice@example.com".to_string()),
+        "still a deliverable recipient"
+    );
+
+    assert_eq!(
+        store
+            .record_bounce("dev", "alice@example.com", 3.0, 5.0)
+            .await
+            .unwrap(),
+        Some(true),
+        "second hard bounce crosses the threshold and disables delivery"
+    );
+    assert!(
+        store.subscribers("dev").await.unwrap().is_empty(),
+        "bounce-disabled address is no longer a delivery recipient"
+    );
+
+    // A bounce for a non-member is a no-op.
+    assert_eq!(
+        store
+            .record_bounce("dev", "stranger@nowhere.example", 3.0, 5.0)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Re-enabling clears the score and restores delivery.
+    assert!(store
+        .enable_member("dev", "alice@example.com")
+        .await
+        .unwrap());
+    assert_eq!(
+        store.subscribers("dev").await.unwrap(),
+        vec!["alice@example.com".to_string()]
+    );
+    let members = store.all_members("dev").await.unwrap();
+    assert_eq!(members[0].bounce_score, 0.0);
+    assert!(!members[0].bounce_disabled);
+}
+
+#[tokio::test]
 async fn moderation_queue_enqueue_get_delete() {
     let store = Store::open_in_memory().await.unwrap();
 

@@ -28,6 +28,47 @@ pub struct Config {
 
     /// Directory containing per-list `<name>.toml` files.
     pub lists_dir: PathBuf,
+
+    /// Bounce-handling thresholds.
+    #[serde(default)]
+    pub bounce: BounceConfig,
+}
+
+/// Controls when a repeatedly-bouncing subscriber has delivery disabled.
+///
+/// Each bounce adds a weight to the subscriber's running score; when the score reaches
+/// `threshold`, delivery to that address is disabled until an operator re-enables it with
+/// `carriers member enable`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BounceConfig {
+    #[serde(default = "default_threshold")]
+    pub threshold: f64,
+    /// Weight added for a permanent (`5.x.x`) failure.
+    #[serde(default = "default_hard_weight")]
+    pub hard_weight: f64,
+    /// Weight added for a transient (`4.x.x`) failure.
+    #[serde(default = "default_soft_weight")]
+    pub soft_weight: f64,
+}
+
+impl Default for BounceConfig {
+    fn default() -> Self {
+        BounceConfig {
+            threshold: default_threshold(),
+            hard_weight: default_hard_weight(),
+            soft_weight: default_soft_weight(),
+        }
+    }
+}
+
+fn default_threshold() -> f64 {
+    5.0
+}
+fn default_hard_weight() -> f64 {
+    3.0
+}
+fn default_soft_weight() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]

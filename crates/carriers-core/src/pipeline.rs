@@ -42,6 +42,21 @@ pub fn verp(list_local: &str, list_domain: &str, recipient: &str) -> String {
     format!("{list_local}+bounce={encoded}@{list_domain}")
 }
 
+/// Decode a VERP bounce address produced by [`verp`], returning
+/// `(list posting address, original recipient)`.
+///
+/// e.g. `dev+bounce=user=example.com@lists.example.org`
+/// -> `("dev@lists.example.org", "user@example.com")`.
+pub fn decode_verp(address: &str) -> Option<(String, String)> {
+    let (local, domain) = address.rsplit_once('@')?;
+    let (base_local, encoded) = local.split_once("+bounce=")?;
+    // The original recipient's `@` was encoded as the last `=` (its local part may itself
+    // contain `=`), so split on the final one.
+    let at = encoded.rfind('=')?;
+    let recipient = format!("{}@{}", &encoded[..at], &encoded[at + 1..]);
+    Some((format!("{base_local}@{domain}"), recipient))
+}
+
 /// Ingest an inbound post: reject loops/duplicates, apply the posting policy (distributing,
 /// holding for moderation, as appropriate), and prepare the message when it may go out now.
 pub async fn intake(
@@ -154,4 +169,33 @@ fn from_address(parsed: &Message) -> Option<String> {
         .and_then(|addr| addr.first())
         .and_then(|addr| addr.address())
         .map(|s| s.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_verp, verp};
+
+    #[test]
+    fn verp_round_trips() {
+        let bounce = verp("dev", "lists.example.org", "user@example.com");
+        assert_eq!(bounce, "dev+bounce=user=example.com@lists.example.org");
+        assert_eq!(
+            decode_verp(&bounce),
+            Some(("dev@lists.example.org".into(), "user@example.com".into()))
+        );
+    }
+
+    #[test]
+    fn decode_verp_handles_equals_in_local_part() {
+        let bounce = verp("dev", "lists.example.org", "a=b@example.com");
+        assert_eq!(
+            decode_verp(&bounce),
+            Some(("dev@lists.example.org".into(), "a=b@example.com".into()))
+        );
+    }
+
+    #[test]
+    fn decode_verp_rejects_plain_addresses() {
+        assert_eq!(decode_verp("dev@lists.example.org"), None);
+    }
 }

@@ -6,6 +6,7 @@
 //! subscriber's server via DKIM alignment. The ARC seal is the backstop for hops that break
 //! the original authentication.
 
+pub mod bounce;
 pub mod config;
 pub mod crypto;
 pub mod error;

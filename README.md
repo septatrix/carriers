@@ -130,22 +130,35 @@ Held posts wait in a per-list queue. Review them with `carriers moderate list`, 
 `carriers moderate reject <id>` (discards it). A "member" who is not a subscriber is added with
 `carriers member add <list> <address> --posting-only`.
 
+## Bounce handling
+
+Every delivered copy carries a per-recipient VERP return path
+(`dev+bounce=user=example.com@lists.example.org`), so a delivery failure produces a DSN
+addressed back to the failing subscriber. carriers recognises those bounce addresses on ingress,
+classifies the DSN (permanent `5.x.x` vs transient `4.x.x`), and adds a weight to the
+subscriber's running bounce score. When the score reaches the configured `threshold` (see the
+`[bounce]` section of [`examples/carriers.toml`](examples/carriers.toml)), delivery to that
+address is disabled — it is skipped as a recipient — until an operator runs
+`carriers member enable <list> <address>`, which clears the score and restores delivery.
+`carriers member list` shows the current bounce score and disabled state.
+
 ## CLI
 
 | Command | Description |
 | --- | --- |
 | `carriers run` | Run the ingress listener and distribute posts. |
 | `carriers genkey` | Generate a DKIM/ARC key pair and print the DNS record. |
-| `carriers member add\|remove\|list <list> [address] [--posting-only]` | Manage members and subscribers. |
+| `carriers member add\|remove\|list\|enable <list> [address] [--posting-only]` | Manage members; `enable` clears bounce state. |
 | `carriers moderate list\|show\|approve\|reject [id]` | Review and act on held messages. |
 | `carriers sync` | Import each list's flat `members_file` into SQLite. |
 
 ## Status / roadmap
 
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (open /
-subscribers / members / moderated), loop and duplicate suppression, `List-*` headers, aligned
-DKIM signing, ARC sealing, VERP envelopes, smarthost delivery, flat-file lists + SQLite
-membership (subscribers and posting-only members), key generation.
+subscribers / members / moderated), VERP bounce processing with automatic delivery disabling,
+loop and duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost
+delivery, flat-file lists + SQLite membership (subscribers and posting-only members), key
+generation.
 
 Deferred / ideas:
 
@@ -153,7 +166,6 @@ Deferred / ideas:
 - direct-to-MX delivery (its own retry queue) instead of a smarthost
 - a REST / pull-based member API
 - web archive and digest mode
-- automated bounce processing
 - opt-in `Subject`-prefix / footer support
 - express moderation as **Sieve filters** rather than a fixed policy enum: custom Sieve
   actions or flags for *auto-approve*, *moderate* and *reject* decisions, evaluated against

@@ -27,3 +27,12 @@ port = 25
 implicit_tls = false
 # Permit plaintext delivery. Only sensible for a trusted local relay (e.g. 127.0.0.1).
 allow_plaintext = true
+
+# Bounce handling (optional; defaults shown). Delivery copies use a per-recipient VERP
+# return path, so bounces come back addressed to the failing subscriber. Each bounce adds a
+# weight to that subscriber's score; when it reaches `threshold`, delivery to them is disabled
+# until re-enabled with `carriers member enable <list> <address>`.
+[bounce]
+threshold = 5.0    # score at which delivery is disabled
+hard_weight = 3.0  # weight of a permanent (5.x.x) failure
+soft_weight = 1.0  # weight of a transient (4.x.x) failure

@@ -9,10 +9,14 @@ use crate::error::Result;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS members (
-    list       TEXT NOT NULL,
-    address    TEXT NOT NULL,
+    list            TEXT NOT NULL,
+    address         TEXT NOT NULL,
     -- 1 = subscriber (receives the list); 0 = member who may post but does not receive.
-    subscribed INTEGER NOT NULL DEFAULT 1,
+    subscribed      INTEGER NOT NULL DEFAULT 1,
+    -- Running bounce score; when it reaches the configured threshold, delivery is disabled.
+    bounce_score    REAL NOT NULL DEFAULT 0,
+    bounce_disabled INTEGER NOT NULL DEFAULT 0,
+    last_bounce_at  INTEGER,
     PRIMARY KEY (list, address)
 );
 CREATE TABLE IF NOT EXISTS seen_messages (
@@ -34,12 +38,25 @@ CREATE TABLE IF NOT EXISTS moderation_queue (
 );
 ";
 
-/// A member of a list, with their subscription state.
+/// A member of a list, with their subscription and bounce state.
 pub struct Member {
     pub address: String,
     /// True if the member receives the list (a subscriber).
     pub subscribed: bool,
+    /// Running bounce score.
+    pub bounce_score: f64,
+    /// True if delivery has been disabled due to bounces.
+    pub bounce_disabled: bool,
 }
+
+/// Idempotent column additions, so databases created by earlier versions gain the newer
+/// columns. Errors (e.g. "duplicate column") are ignored.
+const MIGRATIONS: &[&str] = &[
+    "ALTER TABLE members ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE members ADD COLUMN bounce_score REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE members ADD COLUMN bounce_disabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE members ADD COLUMN last_bounce_at INTEGER",
+];
 
 /// A summary row of the moderation queue (without the message body).
 pub struct HeldSummary {
@@ -90,6 +107,13 @@ impl Store {
 
     async fn init(pool: SqlitePool) -> Result<Self> {
         sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+        for migration in MIGRATIONS {
+            // Best-effort: a "duplicate column" error just means it is already present.
+            // These are audited, static DDL literals, hence AssertSqlSafe.
+            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(*migration))
+                .execute(&pool)
+                .await;
+        }
         Ok(Store { pool })
     }
 
@@ -141,10 +165,11 @@ impl Store {
         Ok(count > 0)
     }
 
-    /// Subscriber addresses (delivery recipients) for the list.
+    /// Deliverable subscriber addresses: subscribed and not bounce-disabled.
     pub async fn subscribers(&self, list: &str) -> Result<Vec<String>> {
         let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT address FROM members WHERE list = ? AND subscribed = 1 ORDER BY address",
+            "SELECT address FROM members \
+             WHERE list = ? AND subscribed = 1 AND bounce_disabled = 0 ORDER BY address",
         )
         .bind(list)
         .fetch_all(&self.pool)
@@ -152,21 +177,68 @@ impl Store {
         Ok(rows)
     }
 
-    /// All members of the list with their subscription state.
+    /// All members of the list with their subscription and bounce state.
     pub async fn all_members(&self, list: &str) -> Result<Vec<Member>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT address, subscribed FROM members WHERE list = ? ORDER BY address",
+        let rows: Vec<(String, i64, f64, i64)> = sqlx::query_as(
+            "SELECT address, subscribed, bounce_score, bounce_disabled \
+             FROM members WHERE list = ? ORDER BY address",
         )
         .bind(list)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(address, subscribed)| Member {
-                address,
-                subscribed: subscribed != 0,
-            })
+            .map(
+                |(address, subscribed, bounce_score, bounce_disabled)| Member {
+                    address,
+                    subscribed: subscribed != 0,
+                    bounce_score,
+                    bounce_disabled: bounce_disabled != 0,
+                },
+            )
             .collect())
+    }
+
+    /// Record a bounce for a subscriber, adding `weight` to their score and disabling delivery
+    /// once the score reaches `threshold`.
+    ///
+    /// Returns `None` if the address is not a member of the list, otherwise `Some(disabled)`
+    /// reflecting whether delivery is now disabled.
+    pub async fn record_bounce(
+        &self,
+        list: &str,
+        address: &str,
+        weight: f64,
+        threshold: f64,
+    ) -> Result<Option<bool>> {
+        let disabled: Option<i64> = sqlx::query_scalar(
+            "UPDATE members SET \
+                 bounce_score = bounce_score + ?3, \
+                 last_bounce_at = strftime('%s','now'), \
+                 bounce_disabled = CASE WHEN bounce_score + ?3 >= ?4 THEN 1 ELSE bounce_disabled END \
+             WHERE list = ?1 AND address = ?2 \
+             RETURNING bounce_disabled",
+        )
+        .bind(list)
+        .bind(address.trim().to_ascii_lowercase())
+        .bind(weight)
+        .bind(threshold)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(disabled.map(|d| d != 0))
+    }
+
+    /// Clear a member's bounce state and re-enable delivery.
+    pub async fn enable_member(&self, list: &str, address: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE members SET bounce_score = 0, bounce_disabled = 0, last_bounce_at = NULL \
+             WHERE list = ? AND address = ?",
+        )
+        .bind(list)
+        .bind(address.trim().to_ascii_lowercase())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // --- Deduplication ------------------------------------------------------------------

@@ -15,9 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
+use carriers_core::bounce::{self, BounceKind};
 use carriers_core::config::Protocol;
 use carriers_core::list::List;
-use carriers_core::pipeline::{self, Disposition};
+use carriers_core::pipeline::{self, decode_verp, Disposition};
 use carriers_core::sign::Ingress;
 use carriers_core::Error as CoreError;
 
@@ -77,7 +78,7 @@ async fn handle_connection(
 
     let mut helo = String::new();
     let mut mail_from: Option<String> = None;
-    let mut recipients: Vec<Arc<List>> = Vec::new();
+    let mut recipients: Vec<Recipient> = Vec::new();
     let mut line: Vec<u8> = Vec::new();
 
     loop {
@@ -114,9 +115,9 @@ async fn handle_connection(
                     write.write_all(b"503 5.5.1 MAIL first\r\n").await?;
                     continue;
                 }
-                match state.list_for_address(&to.address) {
-                    Some(list) => {
-                        recipients.push(list.clone());
+                match classify_recipient(&state, &to.address) {
+                    Some(recipient) => {
+                        recipients.push(recipient);
                         write.write_all(b"250 2.1.5 OK\r\n").await?;
                     }
                     None => {
@@ -191,37 +192,114 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Process the message for each addressed list, returning one SMTP reply line per recipient.
+/// A resolved envelope recipient: a post to a list, or a bounce (DSN) for a subscriber.
+enum Recipient {
+    Post(Arc<List>),
+    Bounce { list: Arc<List>, address: String },
+}
+
+/// Classify a RCPT TO address as a bounce (VERP) address or a post to a list address.
+fn classify_recipient(state: &AppState, address: &str) -> Option<Recipient> {
+    if let Some((base, recipient)) = decode_verp(address) {
+        if let Some(list) = state.list_for_address(&base) {
+            return Some(Recipient::Bounce {
+                list: list.clone(),
+                address: recipient,
+            });
+        }
+    }
+    state
+        .list_for_address(address)
+        .map(|list| Recipient::Post(list.clone()))
+}
+
+/// Handle each envelope recipient, returning one SMTP reply line per recipient.
 async fn process(
     state: &Arc<AppState>,
-    recipients: &[Arc<List>],
+    recipients: &[Recipient],
     ingress: &Ingress,
     raw: &[u8],
 ) -> Vec<String> {
     let mut replies = Vec::with_capacity(recipients.len());
-    for list in recipients {
-        let reply = match handle_one(state, list, ingress, raw).await {
-            Ok(Outcome::Distributed(count)) => {
-                info!(list = %list.name, recipients = count, "distributed message");
-                "250 2.6.0 Message accepted\r\n".to_string()
-            }
-            Ok(Outcome::Held(id)) => {
-                info!(list = %list.name, id, "message held for moderation");
-                "250 2.6.0 Message accepted (held for moderation)\r\n".to_string()
-            }
-            Ok(Outcome::Dropped(reason)) => {
-                // Accept-and-drop: replying 2xx avoids generating backscatter.
-                info!(list = %list.name, reason, "message dropped");
-                "250 2.6.0 Message accepted (not distributed)\r\n".to_string()
-            }
-            Err(err) => {
-                error!(list = %list.name, %err, "processing failed");
-                "451 4.3.0 Temporary processing failure\r\n".to_string()
-            }
+    for recipient in recipients {
+        let reply = match recipient {
+            Recipient::Post(list) => post_reply(state, list, ingress, raw).await,
+            Recipient::Bounce { list, address } => bounce_reply(state, list, address, raw).await,
         };
         replies.push(reply);
     }
     replies
+}
+
+async fn post_reply(
+    state: &Arc<AppState>,
+    list: &Arc<List>,
+    ingress: &Ingress,
+    raw: &[u8],
+) -> String {
+    match handle_one(state, list, ingress, raw).await {
+        Ok(Outcome::Distributed(count)) => {
+            info!(list = %list.name, recipients = count, "distributed message");
+            "250 2.6.0 Message accepted\r\n".to_string()
+        }
+        Ok(Outcome::Held(id)) => {
+            info!(list = %list.name, id, "message held for moderation");
+            "250 2.6.0 Message accepted (held for moderation)\r\n".to_string()
+        }
+        Ok(Outcome::Dropped(reason)) => {
+            // Accept-and-drop: replying 2xx avoids generating backscatter.
+            info!(list = %list.name, reason, "message dropped");
+            "250 2.6.0 Message accepted (not distributed)\r\n".to_string()
+        }
+        Err(err) => {
+            error!(list = %list.name, %err, "processing failed");
+            "451 4.3.0 Temporary processing failure\r\n".to_string()
+        }
+    }
+}
+
+async fn bounce_reply(
+    state: &Arc<AppState>,
+    list: &Arc<List>,
+    address: &str,
+    raw: &[u8],
+) -> String {
+    match handle_bounce(state, list, address, raw).await {
+        Ok(()) => "250 2.1.5 Bounce recorded\r\n".to_string(),
+        Err(err) => {
+            error!(list = %list.name, address, %err, "recording bounce failed");
+            "451 4.3.0 Could not record bounce\r\n".to_string()
+        }
+    }
+}
+
+/// Record a bounce (DSN) for a subscriber, disabling delivery once their score crosses the
+/// configured threshold.
+async fn handle_bounce(
+    state: &Arc<AppState>,
+    list: &Arc<List>,
+    address: &str,
+    raw: &[u8],
+) -> anyhow::Result<()> {
+    let kind = bounce::classify(raw);
+    let weight = match kind {
+        BounceKind::Hard => state.config.bounce.hard_weight,
+        BounceKind::Soft => state.config.bounce.soft_weight,
+        BounceKind::Unknown => {
+            info!(list = %list.name, address, "ignoring non-DSN message to bounce address");
+            return Ok(());
+        }
+    };
+    match state
+        .store
+        .record_bounce(&list.name, address, weight, state.config.bounce.threshold)
+        .await?
+    {
+        Some(true) => warn!(list = %list.name, address, ?kind, "delivery disabled after bounces"),
+        Some(false) => info!(list = %list.name, address, ?kind, "recorded bounce"),
+        None => info!(list = %list.name, address, "bounce for non-member; ignored"),
+    }
+    Ok(())
 }
 
 enum Outcome {

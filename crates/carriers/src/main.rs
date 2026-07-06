@@ -105,6 +105,8 @@ enum MemberCommand {
     Remove { list: String, address: String },
     /// List members of a list and their roles.
     List { list: String },
+    /// Clear a member's bounce state and re-enable delivery.
+    Enable { list: String, address: String },
 }
 
 #[derive(Subcommand)]
@@ -202,7 +204,7 @@ async fn sync(config_path: &Path) -> Result<()> {
 async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
     let config = Config::load(config_path)?;
     let store = open_store(&config).await?;
-    let provider = SqliteMemberProvider::new(store);
+    let provider = SqliteMemberProvider::new(store.clone());
     match cmd {
         MemberCommand::Add {
             list,
@@ -225,7 +227,21 @@ async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
                 } else {
                     "poster"
                 };
-                println!("{}\t{role}", member.address);
+                let status = if member.bounce_disabled {
+                    format!(" [bounce-disabled score={:.1}]", member.bounce_score)
+                } else if member.bounce_score > 0.0 {
+                    format!(" [bounces score={:.1}]", member.bounce_score)
+                } else {
+                    String::new()
+                };
+                println!("{}\t{role}{status}", member.address);
+            }
+        }
+        MemberCommand::Enable { list, address } => {
+            if store.enable_member(&list, &address).await? {
+                println!("re-enabled {address} on {list}");
+            } else {
+                bail!("no member {address} on {list}");
             }
         }
     }
