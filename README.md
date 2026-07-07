@@ -201,6 +201,9 @@ Deferred / ideas:
 - opt-in `Subject`-prefix / footer support
 - per-list (rather than global) Sieve policies, and richer policy context (spam/DKIM results,
   message size) exposed to scripts
+- custom Sieve functions registered via the runtime builder's `with_functions`, so policy
+  scripts can call carriers-provided helpers — e.g. stripping an attachment, checking a value
+  against an external service, or rewriting a header
 - add CI, including [REUSE](https://reuse.software/) license-compliance checking (`reuse lint`)
   to keep licensing machine-readable and consistent (esp. given the MPL-2.0 project vs the
   AGPL-3.0 `sieve-rs` dependency)
