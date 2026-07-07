@@ -197,7 +197,10 @@ Deferred / ideas:
 - STARTTLS / implicit TLS on the listener
 - direct-to-MX delivery (its own retry queue) instead of a smarthost
 - a REST / pull-based member API
-- web archive and digest mode
+- digest mode
+- message archiving: store each distributed post as an `.eml` file on disk under a per-list
+  subdirectory, with a search index (full-text over headers/body) for retrieval; a web archive
+  could be layered on top
 - opt-in `Subject`-prefix / footer support
 - per-list (rather than global) Sieve policies, and richer policy context (spam/DKIM results,
   message size) exposed to scripts
