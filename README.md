@@ -204,6 +204,11 @@ Deferred / ideas:
 - custom Sieve functions registered via the runtime builder's `with_functions`, so policy
   scripts can call carriers-provided helpers — e.g. stripping an attachment, checking a value
   against an external service, or rewriting a header
+- bounce probing (à la Mailman): periodically send a probe message to a bouncing subscriber to
+  distinguish a list-specific block (e.g. the recipient's spam filter rejecting only list mail)
+  from a wholesale block of the sending software (e.g. IP-reputation problems). A failed probe
+  is a stronger signal about that subscriber and should be weighted higher than an ordinary
+  bounce to a list post
 - add CI, including [REUSE](https://reuse.software/) license-compliance checking (`reuse lint`)
   to keep licensing machine-readable and consistent (esp. given the MPL-2.0 project vs the
   AGPL-3.0 `sieve-rs` dependency)
