@@ -2,16 +2,21 @@
 //!
 //! Outbound copies carry a per-recipient VERP return path (see [`crate::pipeline::verp`]), so a
 //! failed delivery produces a DSN addressed back to that VERP address. We classify the DSN by
-//! its RFC 3464 `Status:` field to weigh permanent failures more heavily than transient ones.
+//! its RFC 3464 `Status:` field, whose value is one of the enhanced mail system status codes
+//! registered by RFC 3463 (`class.subject.detail`, e.g. `5.1.1`), to weigh permanent failures
+//! more heavily than transient ones.
 
 /// The severity of a bounce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BounceKind {
-    /// Permanent failure (`5.x.x`) — the address is very likely dead.
+    /// Permanent failure (RFC 3463 class `5.x.x`) — the address is very likely dead.
     Hard,
-    /// Transient failure (`4.x.x`) — a temporary problem (full mailbox, greylisting, …).
+    /// Transient failure (RFC 3463 class `4.x.x`) — a temporary problem (full mailbox,
+    /// greylisting, …).
     Soft,
-    /// Not recognisable as a DSN (e.g. an auto-reply); do not penalise.
+    /// Not recognisable as a failure DSN: no `Status:` field, an auto-reply, or a success
+    /// notification (RFC 3463 class `2.x.x`, e.g. a requested `NOTIFY=SUCCESS` receipt).
+    /// Not penalised.
     Unknown,
 }
 

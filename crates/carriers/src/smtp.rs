@@ -247,7 +247,7 @@ async fn post_reply(
             "250 2.6.0 Message accepted (held for moderation)\r\n".to_string()
         }
         Ok(Outcome::Dropped(reason)) => {
-            // Accept-and-drop: replying 2xx avoids generating backscatter.
+            // Accept-and-drop: a 2xx SMTP reply avoids generating backscatter.
             info!(list = %list.name, reason, "message dropped");
             "250 2.6.0 Message accepted (not distributed)\r\n".to_string()
         }

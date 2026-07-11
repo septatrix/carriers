@@ -31,7 +31,10 @@ pub enum Disposition {
     Distribute(Prepared),
     /// Held for moderation (already stored in the queue); `id` is the queue entry.
     Held { id: i64 },
-    /// Accepted but not distributed (loop or duplicate). Reply 2xx to avoid backscatter.
+    /// Accepted but not distributed (loop or duplicate). The caller should still reply with a
+    /// 2xx SMTP status (accept), rather than a 5xx rejection, to avoid backscatter — this is
+    /// the three-digit basic SMTP reply code, distinct from the RFC 3463 enhanced status code
+    /// (itself also written `2.x.x`) that accompanies it in the reply text.
     Dropped { reason: String },
 }
 
