@@ -35,6 +35,13 @@ pub struct Config {
     #[serde(default)]
     pub policies_dir: Option<PathBuf>,
 
+    /// A Sieve script run for every list, after loop/duplicate detection but before the list's
+    /// own `policy` — see [`crate::policy::PolicyEngine::evaluate_global`]. Optional: if unset,
+    /// [`Config::load`] falls back to a `global.sieve` file next to this config file, if one
+    /// exists.
+    #[serde(default)]
+    pub global_policy_file: Option<PathBuf>,
+
     /// Bounce-handling thresholds.
     #[serde(default)]
     pub bounce: BounceConfig,
@@ -108,8 +115,17 @@ fn default_smarthost_port() -> u16 {
 }
 
 impl Config {
+    /// Load and parse `path`. If `global_policy_file` is not set, a `global.sieve` file next to
+    /// `path` is used automatically if present.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&text)?)
+        let mut config: Config = toml::from_str(&text)?;
+        if config.global_policy_file.is_none() {
+            let sibling = path.with_file_name("global.sieve");
+            if sibling.is_file() {
+                config.global_policy_file = Some(sibling);
+            }
+        }
+        Ok(config)
     }
 }

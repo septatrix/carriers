@@ -35,12 +35,12 @@ impl AppState {
         let authenticator = MessageAuthenticator::new_system_conf()
             .context("initialising DNS resolver from system configuration")?;
 
-        let policy = match &config.policies_dir {
-            Some(dir) => PolicyEngine::load(dir)
-                .with_context(|| format!("loading Sieve policies from {}", dir.display()))?,
-            None => PolicyEngine::new().context("compiling built-in policies")?,
-        };
-        info!(custom_policies = policy.names().count(), "loaded policies");
+        let policy = load_policy_engine(&config)?;
+        info!(
+            custom_policies = policy.names().count(),
+            global_policy = config.global_policy_file.is_some(),
+            "loaded policies"
+        );
 
         let lists = load_lists(&config)?;
         info!(count = lists.len(), "loaded lists");
@@ -64,6 +64,22 @@ impl AppState {
     /// Find a loaded list by its short name (the `<name>.toml` stem).
     pub fn list_by_name(&self, name: &str) -> Option<&Arc<List>> {
         self.lists.values().find(|list| list.name == name)
+    }
+}
+
+/// Compile the policy engine named by `config`: built-ins, any custom scripts in
+/// `policies_dir`, and the global policy (if any) from `global_policy_file`.
+pub fn load_policy_engine(config: &Config) -> Result<PolicyEngine> {
+    let policy = match &config.policies_dir {
+        Some(dir) => PolicyEngine::load(dir)
+            .with_context(|| format!("loading Sieve policies from {}", dir.display()))?,
+        None => PolicyEngine::new().context("compiling built-in policies")?,
+    };
+    match &config.global_policy_file {
+        Some(path) => policy
+            .with_global(path)
+            .with_context(|| format!("loading global Sieve policy {}", path.display())),
+        None => Ok(policy),
     }
 }
 

@@ -36,6 +36,14 @@
 //! elsif address :list "from" "posters" { fileinto "moderate"; }
 //! else { reject "Only subscribers and posters may write to this list."; }
 //! ```
+//!
+//! ## Global policy
+//!
+//! One further, optional script (see [`PolicyEngine::evaluate_global`]) may run for *every*
+//! list, ahead of that list's own `policy`. It runs after loop/duplicate detection, once the
+//! current list is already known, so it still sees that list's membership sets — unlike the
+//! list-independent tier sketched in the README's roadmap, which would run before a list is
+//! even resolved.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -118,10 +126,12 @@ impl ExternalLists for MembershipSets {
 }
 
 /// A registry of compiled Sieve policies: the built-ins plus any custom scripts loaded from a
-/// directory of `*.sieve` files.
+/// directory of `*.sieve` files, plus an optional global script (see
+/// [`PolicyEngine::evaluate_global`]).
 pub struct PolicyEngine {
     engine: SieveEngine,
     policies: HashMap<String, Arc<Sieve>>,
+    global: Option<Arc<Sieve>>,
 }
 
 impl PolicyEngine {
@@ -135,7 +145,22 @@ impl PolicyEngine {
                 .map_err(|e| Error::Config(format!("compiling built-in policy `{name}`: {e}")))?;
             policies.insert((*name).to_string(), compiled);
         }
-        Ok(PolicyEngine { engine, policies })
+        Ok(PolicyEngine {
+            engine,
+            policies,
+            global: None,
+        })
+    }
+
+    /// Compile and attach the global policy script from `path`, run by
+    /// [`PolicyEngine::evaluate_global`] ahead of every list's own policy.
+    pub fn with_global(mut self, path: &Path) -> Result<Self> {
+        let text = std::fs::read(path)?;
+        let compiled = self.engine.compile(&text).map_err(|e| {
+            Error::Config(format!("compiling global policy {}: {e}", path.display()))
+        })?;
+        self.global = Some(compiled);
+        Ok(self)
     }
 
     /// The built-in policies plus every custom `*.sieve` file in `dir` (the file stem is the
@@ -206,12 +231,46 @@ impl PolicyEngine {
             &[("vnd.carriers.list", list_name)],
             sets,
         )?;
-        Ok(match outcome {
-            SieveOutcome::Keep => PolicyDecision::Approve,
-            SieveOutcome::Discard => PolicyDecision::Discard,
-            SieveOutcome::Reject { reason } => PolicyDecision::Reject { reason },
-            SieveOutcome::FileInto { folder } => classify_folder(&folder),
-        })
+        Ok(decision_from_outcome(outcome))
+    }
+
+    /// Evaluate the global policy (if one is configured) against a message, for `list_name`'s
+    /// membership sets. Returns `None` if no global policy was attached via
+    /// [`PolicyEngine::with_global`].
+    ///
+    /// A result of [`PolicyDecision::Approve`] means the global script found no reason to act —
+    /// it is *not* authoritative, and the list's own policy still runs normally afterwards. Any
+    /// other decision (`Moderate`, `Discard`, `Reject`) is authoritative and short-circuits the
+    /// list's own policy.
+    pub fn evaluate_global(
+        &self,
+        list_name: &str,
+        mail_from: &str,
+        raw: &[u8],
+        sets: &MembershipSets,
+    ) -> Result<Option<PolicyDecision>> {
+        let Some(script) = &self.global else {
+            return Ok(None);
+        };
+        let outcome = self.engine.run(
+            "global",
+            script,
+            raw,
+            mail_from,
+            &[("vnd.carriers.list", list_name)],
+            sets,
+        )?;
+        Ok(Some(decision_from_outcome(outcome)))
+    }
+}
+
+/// Map a [`SieveOutcome`] to the carriers-specific [`PolicyDecision`] it represents.
+fn decision_from_outcome(outcome: SieveOutcome) -> PolicyDecision {
+    match outcome {
+        SieveOutcome::Keep => PolicyDecision::Approve,
+        SieveOutcome::Discard => PolicyDecision::Discard,
+        SieveOutcome::Reject { reason } => PolicyDecision::Reject { reason },
+        SieveOutcome::FileInto { folder } => classify_folder(&folder),
     }
 }
 

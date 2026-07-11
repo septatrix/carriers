@@ -202,6 +202,27 @@ mailing-list semantics. `policy` module builds on it: it interprets the engine's
 `PolicyDecision`, and ships the built-in policies as standalone `<name>.sieve` files (embedded
 into the binary at compile time with `include_str!`) rather than inline Rust string literals.
 
+### Global policy
+
+Alongside each list's own `policy`, an optional **global** Sieve script (see
+[`examples/global.sieve`](examples/global.sieve)) can run for every list, right after loop and
+duplicate detection but before that list's own policy — so it still has access to the current
+list's membership sets, same as a per-list script. It's for rules that should apply everywhere
+regardless of list, e.g. a shared abuse blocklist.
+
+Set its path explicitly with `global_policy_file` in `carriers.toml`, or drop a `global.sieve`
+file next to `carriers.toml` and it's picked up automatically. Neither is required; without
+either, only each list's own policy runs.
+
+An implicit keep (nothing in the script matched) is *not* authoritative — it just means the
+global script found no reason to act, and the list's own policy still runs normally afterwards.
+An explicit `fileinto "moderate"`, `discard`, or `reject` *is* authoritative and short-circuits
+before the list's own policy runs. There is deliberately no way for the global script to force
+an *approval* that bypasses the list's own policy — only to hold, discard, or reject ahead of
+it — since an ordinary `keep`/implicit-keep already means "no opinion," and giving it a second,
+authoritative meaning would make an empty or narrowly-scoped global script silently approve
+everything it doesn't otherwise mention.
+
 ## Bounce handling
 
 Every delivered copy carries a per-recipient VERP return path
@@ -228,10 +249,11 @@ address is disabled — it is skipped as a recipient — until an operator runs
 ## Status / roadmap
 
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
-open / subscribers / posters / moderated modes, or a Sieve script), VERP bounce processing with
-automatic delivery disabling, loop and duplicate suppression, `List-*` headers, aligned DKIM
-signing, ARC sealing, smarthost delivery, flat-file lists + SQLite membership (independent
-subscriber, poster and moderator roles), key generation.
+open / subscribers / posters / moderated modes, or a Sieve script), an optional global Sieve
+policy shared across all lists, VERP bounce processing with automatic delivery disabling, loop
+and duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost
+delivery, flat-file lists + SQLite membership (independent subscriber, poster and moderator
+roles), key generation.
 
 Deferred / ideas:
 
@@ -242,11 +264,17 @@ Deferred / ideas:
   subdirectory, with a search index (full-text over headers/body) for retrieval; a web archive
   could be layered on top
 - opt-in `Subject`-prefix / footer support
-- per-list (rather than global) Sieve policies, and richer policy context (spam/DKIM results,
-  message size) exposed to scripts
+- richer policy context (spam/DKIM results, message size) exposed to scripts
 - custom Sieve functions registered via the runtime builder's `with_functions`, so policy
   scripts can call carriers-provided helpers — e.g. stripping an attachment, checking a value
   against an external service, or rewriting a header
+- a further, list-independent Sieve tier that runs *before* a message is even matched to a list
+  (upstream of loop/duplicate detection and the global policy described above), for checks that
+  don't need list membership at all — e.g. rejecting anything over a given size regardless of
+  which list it's addressed to. Unlike the global policy, this would currently need some
+  refactoring: the loop that receives a message and figures out which list it's for lives in the
+  `carriers` binary crate's SMTP listener, not `carriers-core`, so this tier has no natural home
+  yet
 - bounce probing (à la Mailman): periodically send a probe message to a bouncing subscriber to
   distinguish a list-specific block (e.g. the recipient's spam filter rejecting only list mail)
   from a wholesale block of the sending software (e.g. IP-reputation problems). A failed probe

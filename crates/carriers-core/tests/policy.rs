@@ -141,3 +141,55 @@ fn custom_policy_may_not_reuse_a_builtin_name() {
     write_policy(dir.path(), "subscribers", "# tries to shadow a built-in\n");
     assert!(PolicyEngine::load(dir.path()).is_err());
 }
+
+#[test]
+fn evaluate_global_is_none_when_unconfigured() {
+    let engine = PolicyEngine::new().unwrap();
+    let decision = engine
+        .evaluate_global(
+            "dev",
+            "anyone@example.com",
+            &message("anyone@example.com"),
+            &sets(),
+        )
+        .unwrap();
+    assert_eq!(decision, None);
+}
+
+#[test]
+fn evaluate_global_runs_ahead_of_the_list_policy_and_sees_its_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let global = dir.path().join("global.sieve");
+    std::fs::write(
+        &global,
+        r#"
+        require ["envelope", "extlists", "fileinto", "reject"];
+        if address :is "from" "spammer@evil.example" { discard; }
+        elsif address :list "from" "moderators"      { fileinto "moderate"; }
+        elsif address :is "from" "banned@evil.example" { reject "banned"; }
+        "#,
+    )
+    .unwrap();
+    let engine = PolicyEngine::new().unwrap().with_global(&global).unwrap();
+
+    let mut sets = sets();
+    sets.moderators.insert("mod@example.com".to_string());
+
+    let eval = |from: &str| {
+        engine
+            .evaluate_global("dev", from, &message(from), &sets)
+            .unwrap()
+    };
+
+    // No opinion -> None is never returned once a global script is attached; an implicit keep
+    // maps to `Approve`, which the caller must *not* treat as authoritative.
+    assert_eq!(eval("alice@example.com"), Some(PolicyDecision::Approve));
+    assert_eq!(eval("spammer@evil.example"), Some(PolicyDecision::Discard));
+    assert_eq!(eval("mod@example.com"), Some(PolicyDecision::Moderate));
+    assert_eq!(
+        eval("banned@evil.example"),
+        Some(PolicyDecision::Reject {
+            reason: "banned".to_string()
+        })
+    );
+}

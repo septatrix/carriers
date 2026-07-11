@@ -70,9 +70,9 @@ pub fn decode_verp(address: &str) -> Option<(String, String)> {
     Some((format!("{base_local}@{domain}"), recipient))
 }
 
-/// Ingest an inbound post: discard loops/duplicates, apply the posting policy (distributing,
-/// holding for moderation, discarding or rejecting, as appropriate), and prepare the message
-/// when it may go out now.
+/// Ingest an inbound post: discard loops/duplicates, run the optional global policy followed by
+/// the list's own posting policy (distributing, holding for moderation, discarding or
+/// rejecting, as appropriate), and prepare the message when it may go out now.
 #[allow(clippy::too_many_arguments)]
 pub async fn intake(
     authenticator: &MessageAuthenticator,
@@ -110,11 +110,38 @@ pub async fn intake(
     }
 
     let sender = from_address(&parsed);
+    let sets = membership_sets(members, &list.name).await?;
+
+    // The optional global policy runs first, ahead of the list's own — see
+    // `PolicyEngine::evaluate_global` for why `Approve` here is not authoritative.
+    if let Some(decision) = policy.evaluate_global(&list.name, &ingress.mail_from, raw, &sets)? {
+        match decision {
+            PolicyDecision::Approve => {}
+            PolicyDecision::Moderate => {
+                return hold(
+                    store,
+                    list,
+                    ingress,
+                    sender.as_deref(),
+                    parsed.subject(),
+                    raw,
+                )
+                .await;
+            }
+            PolicyDecision::Discard => {
+                return Ok(Disposition::Discarded {
+                    reason: "discarded by global policy".into(),
+                });
+            }
+            PolicyDecision::Reject { reason } => {
+                return Ok(Disposition::Rejected { reason });
+            }
+        }
+    }
 
     // Every list is moderated by a Sieve policy, named by `list.cfg.policy` — either a
     // built-in name or a custom `<name>.sieve` file; both run through the same engine.
     let policy_name = list.cfg.policy.as_str();
-    let sets = membership_sets(members, &list.name).await?;
     let approved = match policy.evaluate(policy_name, &list.name, &ingress.mail_from, raw, &sets)? {
         PolicyDecision::Approve => true,
         PolicyDecision::Moderate => false,
@@ -132,19 +159,39 @@ pub async fn intake(
         let prepared = finalize(authenticator, members, list, hostname, ingress, raw).await?;
         Ok(Disposition::Distribute(prepared))
     } else {
-        let id = store
-            .enqueue_held(
-                &list.name,
-                &ingress.mail_from,
-                &ingress.helo,
-                &ingress.remote_ip.to_string(),
-                sender.as_deref(),
-                parsed.subject(),
-                raw,
-            )
-            .await?;
-        Ok(Disposition::Held { id })
+        hold(
+            store,
+            list,
+            ingress,
+            sender.as_deref(),
+            parsed.subject(),
+            raw,
+        )
+        .await
     }
+}
+
+/// Enqueue a message in the moderation queue.
+async fn hold(
+    store: &Store,
+    list: &List,
+    ingress: &Ingress,
+    sender: Option<&str>,
+    subject: Option<&str>,
+    raw: &[u8],
+) -> Result<Disposition> {
+    let id = store
+        .enqueue_held(
+            &list.name,
+            &ingress.mail_from,
+            &ingress.helo,
+            &ingress.remote_ip.to_string(),
+            sender,
+            subject,
+            raw,
+        )
+        .await?;
+    Ok(Disposition::Held { id })
 }
 
 /// Build the membership sets exposed to Sieve policies for `list_name`.

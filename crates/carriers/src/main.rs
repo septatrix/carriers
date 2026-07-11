@@ -16,11 +16,10 @@ use carriers_core::config::Config;
 use carriers_core::keygen;
 use carriers_core::list::{Algorithm, List};
 use carriers_core::member::{MemberProvider, SqliteMemberProvider};
-use carriers_core::policy::PolicyEngine;
 use carriers_core::sign::Ingress;
 use carriers_core::store::Store;
 
-use crate::state::{load_lists, AppState};
+use crate::state::{load_lists, load_policy_engine, AppState};
 
 #[derive(Parser)]
 #[command(
@@ -370,11 +369,7 @@ async fn moderate(config_path: &Path, cmd: ModerateCommand) -> Result<()> {
 
 fn policies(config_path: &Path) -> Result<()> {
     let config = Config::load(config_path)?;
-    let engine = match &config.policies_dir {
-        Some(dir) => PolicyEngine::load(dir)
-            .with_context(|| format!("loading Sieve policies from {}", dir.display()))?,
-        None => PolicyEngine::new().context("compiling built-in policies")?,
-    };
+    let engine = load_policy_engine(&config)?;
 
     println!(
         "built-in: {}, {}, {}, {}",
@@ -389,6 +384,10 @@ fn policies(config_path: &Path) -> Result<()> {
         println!("custom:   (none)");
     } else {
         println!("custom:   {}", names.join(", "));
+    }
+    match &config.global_policy_file {
+        Some(path) => println!("global:   {}", path.display()),
+        None => println!("global:   (none)"),
     }
     Ok(())
 }

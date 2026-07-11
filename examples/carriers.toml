@@ -23,6 +23,13 @@ lists_dir = "/etc/carriers/lists"
 # extension) is the policy name.
 policies_dir = "/etc/carriers/policies"
 
+# A Sieve script run for every list, after loop/duplicate detection but before that list's own
+# `policy` (see the README's "Sieve policies" section). Useful for checks that apply everywhere
+# regardless of list — e.g. a shared spam/abuse blocklist — while still having access to the
+# current list's membership (subscribers/posters/moderators). Optional: if left unset, a
+# `global.sieve` file next to this config file is used automatically if one exists.
+# global_policy_file = "/etc/carriers/global.sieve"
+
 [smarthost]
 # Outbound copies are relayed here. A local MTA (Postfix/Exim) is the intended target: it
 # owns queueing, retries, MX resolution and outbound TLS.
