@@ -28,6 +28,34 @@ Built on the battle-tested [Stalwart Labs](https://github.com/orgs/stalwartlabs/
 crates: `mail-auth` (DKIM/SPF/DMARC/ARC), `mail-parser`, `mail-builder`, `mail-send`,
 `smtp-proto`, and `sieve`.
 
+## How it compares
+
+|  | carriers | [GNU Mailman 3](https://mailman.readthedocs.io/) | [mlmmj](https://mlmmj.org/) | [Sympa](https://www.sympa.community/) |
+| --- | --- | --- | --- | --- |
+| Language | Rust | Python | C | Perl |
+| License | MPL-2.0 (+ the AGPL-3.0 `sieve-rs` dependency) | GPL-3.0-or-later | MIT | GPL-2.0 |
+| Architecture | single binary; SMTP/LMTP listener, relays out via a smarthost | Core + Postorius (web UI) + HyperKitty (archiver), Django/DB-backed | minimal; invoked per message by the local MTA (procmail-style) | full suite: WWSympa web UI plus several daemons, DB-backed |
+| Web UI | none (CLI only) | yes (Postorius) | none | yes (WWSympa) |
+| Author's original DKIM signature | preserved by design — body and existing headers are never rewritten | broken by default — DMARC mitigation munges `From` or wraps the message | preserved *if* the operator leaves the footer/subject-prefix tunables off | broken when DMARC protection is enabled — it rewrites `From` |
+| List's own aligned DKIM signature | built in, automatic | left to the outbound MTA | not provided | built in (`Mail::DKIM`) |
+| ARC sealing | built in, automatic | built in (3.3.8+) | not provided | built in, can share the DKIM key |
+| Moderation | Sieve scripts (RFC 5228/5429): built-in open/subscribers/posters/moderated modes, or a custom script | rules/chains configured via the DB or web UI | mail-command driven, flat-file config | scenarios configured via the DB or web UI |
+| Membership storage | flat-file seed + SQLite | relational DB (Django ORM) | flat text files (mbox-style directories) | relational DB |
+| Bounce handling | VERP, automatic scoring and delivery disabling | VERP, bounce processing | VERP, automated bounce handling (`mlmmj-bounce`) | VERP, bounce processing |
+| Archiving | not yet — planned (see [Status / roadmap](#status--roadmap)) | yes (HyperKitty) | no (left to external tools) | yes |
+| Digest mode | not yet — planned | yes | yes | yes |
+
+Mailman 3 and Sympa are mature, full-featured suites with web UIs, archiving and far more
+configurability than carriers currently offers; both also added ARC support to cope with DMARC,
+but their default DMARC mitigation still rewrites `From` (breaking the author's own DKIM
+signature) rather than preserving it. mlmmj is the closest match in spirit — minimal, mail-only,
+config-file driven — and, like carriers, can pass DMARC by leaving messages alone, but it has no
+notion of DKIM/ARC itself: getting a signature onto outbound mail is entirely down to how you
+configure the surrounding MTA, and there's no aligned list-domain signature or ARC seal. carriers
+folds DKIM signing and ARC sealing into the core pipeline itself, so the compliance behavior
+doesn't depend on the surrounding MTA setup — at the cost of being the newest and least featureful
+project of the four.
+
 ## Architecture
 
 ```mermaid
