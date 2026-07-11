@@ -329,7 +329,7 @@ async fn handle_bounce(
     Ok(())
 }
 
-enum Outcome {
+pub enum Outcome {
     Distributed(usize),
     Held(i64),
     Discarded(String),
@@ -371,24 +371,35 @@ async fn handle_one(
     }
 }
 
-/// Distribute a message a moderator has approved.
+/// Finalize a message a moderator has approved. This still runs the "after" policy tier (see
+/// [`pipeline::finalize`]), which may hold, discard or reject the message even now, so the
+/// result is the same [`Outcome`] as an inbound post rather than an unconditional delivery.
 pub async fn distribute_approved(
     state: &Arc<AppState>,
     list: &Arc<List>,
     ingress: &Ingress,
     raw: &[u8],
-) -> anyhow::Result<usize> {
-    let prepared = pipeline::finalize(
+) -> anyhow::Result<Outcome> {
+    let disposition = pipeline::finalize(
         &state.authenticator,
+        &state.store,
         state.members.as_ref(),
+        &state.policy,
         list,
         &state.config.hostname,
         ingress,
         raw,
     )
     .await?;
-    let count = deliver(&state.config.smarthost, &prepared).await?;
-    Ok(count)
+    match disposition {
+        Disposition::Distribute(prepared) => {
+            let count = deliver(&state.config.smarthost, &prepared).await?;
+            Ok(Outcome::Distributed(count))
+        }
+        Disposition::Held { id } => Ok(Outcome::Held(id)),
+        Disposition::Discarded { reason } => Ok(Outcome::Discarded(reason)),
+        Disposition::Rejected { reason } => Ok(Outcome::Rejected(reason)),
+    }
 }
 
 /// Read the DATA payload, terminated by `<CRLF>.<CRLF>`, performing dot-unstuffing.

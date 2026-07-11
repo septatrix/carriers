@@ -202,10 +202,10 @@ mailing-list semantics. `policy` module builds on it: it interprets the engine's
 `PolicyDecision`, and ships the built-in policies as standalone `<name>.sieve` files (embedded
 into the binary at compile time with `include_str!`) rather than inline Rust string literals.
 
-### Loop and duplicate detection
+### Built-in loop, duplicate, and header scripts
 
-Loop and duplicate suppression are themselves built-in Sieve scripts (embedded the same way),
-run ahead of the policy chain on every message:
+Several mechanical steps are themselves built-in Sieve scripts (embedded the same way as the
+built-in policies):
 
 - **Loop detection** is a header check: `loop.sieve` discards a message that already carries this
   list's own `List-Id` (exposed to the script as the `vnd.carriers.list_id` environment
@@ -214,6 +214,14 @@ run ahead of the policy chain on every message:
   `duplicate.sieve` discards a message whose `Message-ID` this list has already seen. The
   seen-`Message-ID` set is stored per list in SQLite; a message with no `Message-ID` is never
   treated as a duplicate.
+- **`List-*` header injection** is `list-headers.sieve`: it `addheader`s the List-* headers
+  (RFC 2369 + RFC 8058) whose values carriers computes from the list config and passes in as
+  environment variables. `addheader` prepends, so the body and existing headers are untouched and
+  the author's DKIM signature stays valid. (mail-parser canonicalises the field name `List-Id` to
+  `List-ID`; the two are equivalent per RFC 5322.)
+
+Loop and duplicate detection run ahead of the policy chain on every message; the header injection
+runs at the very end, just before signing, on a message that is going out.
 
 ### Global policy
 
@@ -222,8 +230,9 @@ configured under `[global_policy]` in `carriers.toml` — right after loop and d
 detection, so they still have access to the current list's membership sets, same as a per-list
 script. There are two axes:
 
-- **before / after**: a `before` script runs ahead of the list's own policy; an `after` script
-  runs once it has decided.
+- **before / after**: a `before` script runs at intake, ahead of the list's own policy, and helps
+  decide moderation. An `after` script runs later — at distribution time, *after* any moderation —
+  as a final gate on a message that is actually about to go out.
 - **instance-wide / per-domain**: `[global_policy]`'s own `before`/`after` apply to *every* list
   regardless of domain; `[global_policy.domains."some.domain"]` adds another before/after pair
   that only applies to lists whose posting address is under that one domain.
@@ -231,8 +240,15 @@ script. There are two axes:
 The full chain, for a list under a domain that has its own entry:
 
 ```text
-global before -> domain before -> the list's own policy -> domain after -> global after
+# at intake:                                    # at distribution (after moderation):
+global before -> domain before -> list policy   ...  domain after -> global after
 ```
+
+The two halves run at different moments. The **before** half (global before, domain before, the
+list's own policy) is evaluated when the message arrives, and decides whether to distribute it
+now, hold it for moderation, discard it, or reject it. The **after** half (domain after, global
+after) runs from `finalize` — for a message approved outright *or* one a moderator later
+approves — so it always gets the last word on what actually leaves the server.
 
 Any step that isn't configured is skipped. Set paths explicitly, or for the two instance-wide
 scripts, drop a `global-before.sieve` / `global-after.sieve` file next to `carriers.toml` and
@@ -254,12 +270,14 @@ list's own policy — only to hold, discard, or reject ahead of it — since an 
 would make an empty or narrowly-scoped script silently approve everything it doesn't otherwise
 mention.
 
-Once any step reaches `discard` or `reject`, the whole chain stops immediately — there is
-nothing left for a later step to add. A `before` script's `fileinto "moderate"` is different: it
-skips the list's own policy (which has nothing to add once the message is already held) but
-still lets the `after` scripts run, since those are specifically meant to have the last word —
-including tightening an existing hold into an outright reject, e.g. for a domain-wide compliance
-rule that must win regardless of what any single list's policy decided.
+Within the before half, once a step reaches `discard` or `reject` the rest of that half is
+skipped, and a `before` script's `fileinto "moderate"` skips straight to holding the message (the
+list's own policy has nothing to add once it's already held). The after half then runs later,
+from `finalize`, starting fresh from an approval — so even a message that was held and then
+approved by a moderator still passes through the `after` scripts, which can tighten it to a hold,
+discard, or reject. That is what makes `after` the place for last-word, domain- or instance-wide
+checks (e.g. a compliance rule that must win regardless of what any single list's policy, or
+moderator, decided).
 
 ## Bounce handling
 

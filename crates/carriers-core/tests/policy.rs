@@ -256,11 +256,11 @@ async fn check_duplicate_is_never_a_duplicate_without_a_store() {
     }
 }
 
-/// Evaluate the full chain for a subscriber in `lists.example.org` (helper to keep the
-/// tier-composition tests readable).
-async fn eval_list(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyDecision {
+/// The "before" half of the chain (global-before -> domain-before -> the list policy), decided
+/// at intake (helper to keep the tier-composition tests readable).
+async fn eval_before(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyDecision {
     engine
-        .evaluate_for_list(
+        .evaluate_before(
             "corporate",
             "dev",
             LIST_ID,
@@ -273,14 +273,27 @@ async fn eval_list(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyDec
         .unwrap()
 }
 
+/// The "after" half of the chain (domain-after -> global-after), decided at distribution time.
+async fn eval_after(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyDecision {
+    engine
+        .evaluate_after("dev", LIST_ID, domain, from, &message(from), &sets())
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
-async fn evaluate_for_list_without_any_global_scripts_just_runs_the_named_policy() {
+async fn evaluate_before_without_any_global_scripts_just_runs_the_named_policy() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
     let engine = PolicyEngine::load(dir.path()).unwrap();
 
     assert_eq!(
-        eval_list(&engine, "lists.example.org", "alice@example.com").await,
+        eval_before(&engine, "lists.example.org", "alice@example.com").await,
+        PolicyDecision::Approve
+    );
+    // With no after-scripts configured, the after half approves too.
+    assert_eq!(
+        eval_after(&engine, "lists.example.org", "alice@example.com").await,
         PolicyDecision::Approve
     );
 }
@@ -302,7 +315,7 @@ async fn global_before_short_circuits_ahead_of_the_list_policy() {
     // spammer would otherwise hit POLICY's final `reject` branch, but the global before-script
     // discards first, so the list policy never runs.
     assert_eq!(
-        eval_list(&engine, "lists.example.org", "spammer@evil.example").await,
+        eval_before(&engine, "lists.example.org", "spammer@evil.example").await,
         PolicyDecision::Discard
     );
 }
@@ -324,7 +337,7 @@ async fn global_before_no_opinion_falls_through_to_the_list_policy() {
     // The before-script's condition never matches alice, so its implicit keep is not
     // authoritative and the list policy (which approves subscribers) still decides.
     assert_eq!(
-        eval_list(&engine, "lists.example.org", "alice@example.com").await,
+        eval_before(&engine, "lists.example.org", "alice@example.com").await,
         PolicyDecision::Approve
     );
 }
@@ -341,18 +354,18 @@ async fn domain_before_only_applies_to_its_own_domain() {
 
     // The scoped domain's before-script discards unconditionally...
     assert_eq!(
-        eval_list(&engine, "lists.example.com", "alice@example.com").await,
+        eval_before(&engine, "lists.example.com", "alice@example.com").await,
         PolicyDecision::Discard
     );
     // ...but a list in a different domain never sees it, so the list policy still approves.
     assert_eq!(
-        eval_list(&engine, "lists.example.org", "alice@example.com").await,
+        eval_before(&engine, "lists.example.org", "alice@example.com").await,
         PolicyDecision::Approve
     );
 }
 
 #[tokio::test]
-async fn global_after_can_escalate_an_approval_from_the_list_policy() {
+async fn global_after_can_escalate_an_approval() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
     let after = write_sieve(
@@ -365,9 +378,14 @@ async fn global_after_can_escalate_an_approval_from_the_list_policy() {
         .with_global_after(&after)
         .unwrap();
 
-    // The list policy approves alice (a subscriber), but the global after-script tightens it.
+    // The before half approves alice (a subscriber)...
     assert_eq!(
-        eval_list(&engine, "lists.example.org", "alice@example.com").await,
+        eval_before(&engine, "lists.example.org", "alice@example.com").await,
+        PolicyDecision::Approve
+    );
+    // ...but at distribution time the after half tightens that approval to a reject.
+    assert_eq!(
+        eval_after(&engine, "lists.example.org", "alice@example.com").await,
         PolicyDecision::Reject {
             reason: "blocked instance-wide".to_string()
         }
@@ -375,7 +393,7 @@ async fn global_after_can_escalate_an_approval_from_the_list_policy() {
 }
 
 #[tokio::test]
-async fn a_before_hold_still_lets_the_after_tier_escalate_it() {
+async fn a_before_hold_then_a_later_after_reject() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
     let before = write_sieve(
@@ -395,11 +413,16 @@ async fn a_before_hold_still_lets_the_after_tier_escalate_it() {
         .with_global_after(&after)
         .unwrap();
 
-    // The before-script holds every message (skipping the list policy entirely, since a hold
-    // has nothing left for it to add), but the after-script still runs and escalates the hold
-    // all the way to a reject.
+    // The before-script holds every message (skipping the list policy, since a hold has nothing
+    // left for it to add) — the message is queued for moderation...
     assert_eq!(
-        eval_list(&engine, "lists.example.org", "alice@example.com").await,
+        eval_before(&engine, "lists.example.org", "alice@example.com").await,
+        PolicyDecision::Moderate
+    );
+    // ...then once a moderator approves it and it reaches `finalize`, the after-script still runs
+    // and escalates it all the way to a reject.
+    assert_eq!(
+        eval_after(&engine, "lists.example.org", "alice@example.com").await,
         PolicyDecision::Reject {
             reason: "blocked instance-wide".to_string()
         }
@@ -407,7 +430,7 @@ async fn a_before_hold_still_lets_the_after_tier_escalate_it() {
 }
 
 #[tokio::test]
-async fn full_chain_runs_in_order_global_before_domain_before_list_domain_after_global_after() {
+async fn full_chain_runs_in_order_before_at_intake_after_at_finalize() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", "keep;\n"); // always approves on its own
     let global_before = write_sieve(dir.path(), "gb.sieve", "# no opinion\n");
@@ -433,10 +456,14 @@ async fn full_chain_runs_in_order_global_before_domain_before_list_domain_after_
         .with_global_after(&global_after)
         .unwrap();
 
-    // global-before/domain-before have no opinion, so the list policy approves; domain-after
-    // then holds it, and global-after has the final word, escalating to a reject.
+    // before half: global-before/domain-before have no opinion, so the list policy approves.
     assert_eq!(
-        eval_list(&engine, "lists.example.com", "alice@example.com").await,
+        eval_before(&engine, "lists.example.com", "alice@example.com").await,
+        PolicyDecision::Approve
+    );
+    // after half: domain-after holds it, then global-after has the final word, a reject.
+    assert_eq!(
+        eval_after(&engine, "lists.example.com", "alice@example.com").await,
         PolicyDecision::Reject {
             reason: "final word".to_string()
         }

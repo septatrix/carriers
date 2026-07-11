@@ -49,15 +49,17 @@
 //!   has already seen is discarded. The seen-set is answered by a [`DuplicateStore`].
 //!
 //! These are ordinary Sieve scripts (embedded via `include_str!`) rather than hand-written Rust,
-//! so the loop/dedup rules live in the same place, and same language, as every other policy.
+//! so the loop/dedup rules live in the same place, and same language, as every other policy. The
+//! `List-*` header injection ([`PolicyEngine::apply_list_headers`], `list-headers.sieve`) is a
+//! built-in script in the same spirit — it uses `addheader` to prepend the headers, DKIM-safely.
 //!
 //! ## Global policy
 //!
-//! Further, optional scripts (see [`PolicyEngine::evaluate_for_list`]) may run for *every* list,
-//! wrapped around that list's own `policy`: a global one, plus an additional one per list
-//! domain. All of these run after the loop/duplicate checks, once the current list is already
-//! known, so they still see that list's membership sets — unlike the list-independent tier
-//! sketched in the README's roadmap, which would run before a list is even resolved.
+//! Further, optional scripts may run for *every* list, wrapped around that list's own `policy`:
+//! a global one, plus an additional one per list domain. All of these run after the
+//! loop/duplicate checks, once the current list is already known, so they still see that list's
+//! membership sets — unlike the list-independent tier sketched in the README's roadmap, which
+//! would run before a list is even resolved.
 //!
 //! The full chain, outside-in for the "before" scripts and inside-out for "after":
 //!
@@ -65,16 +67,20 @@
 //! global before -> domain before -> the list's own policy -> domain after -> global after
 //! ```
 //!
+//! This splits across two moments in a message's life. The **before** half — global before,
+//! domain before, the list's own policy — is decided at intake, in
+//! [`PolicyEngine::evaluate_before`]: it determines whether to distribute, hold, discard, or
+//! reject. The **after** half — domain after, global after — runs later, at distribution time,
+//! in [`PolicyEngine::evaluate_after`] (called from [`crate::pipeline::finalize`]), *after* any
+//! moderation, so it has the last word on a message that is actually about to go out.
+//!
 //! At every step, an implicit keep is *not* authoritative: it means that script found no reason
 //! to act, so the decision made so far (`Approve` unless an earlier step already decided
 //! otherwise) carries through unchanged. `Moderate`, `Discard`, and `Reject` *are* authoritative
-//! and become the new decision so far. Once a step reaches `Discard` or `Reject`, the chain
-//! stops immediately — there is nothing left for a later step to add. A `Moderate` reached
-//! before the list's own policy skips straight to the "after" scripts, since the list's own
-//! policy has nothing to add once the message is already held; a `Moderate` reached at or after
-//! the list's own policy still lets the remaining "after" scripts tighten it further (e.g. to
-//! `Reject`), since `after` is specifically the tier for such last-word, domain- or
-//! instance-wide checks.
+//! and become the new decision so far. Once a "before" step reaches `Discard` or `Reject`, the
+//! rest of the before half is skipped; a `Moderate` there holds the message for moderation. The
+//! after half then starts fresh from `Approve` and may still tighten it (e.g. escalate to a
+//! `Reject`), which is why `after` is the tier for last-word, domain- or instance-wide checks.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -83,7 +89,9 @@ use std::sync::Arc;
 use sieve::Sieve;
 
 use crate::error::{Error, Result};
-use crate::sieve_engine::{DuplicateStore, ExternalLists, NoDuplicates, SieveEngine, SieveOutcome};
+use crate::sieve_engine::{
+    DuplicateStore, ExternalLists, NoDuplicates, SieveEngine, SieveOutcome, SieveRun,
+};
 
 /// External list names exposed to policy scripts via the Sieve `:list` match.
 pub const LIST_SUBSCRIBERS: &str = "subscribers";
@@ -172,11 +180,13 @@ struct DomainScripts {
 
 /// A registry of compiled Sieve policies: the built-in loop/dedup checks and posting policies,
 /// plus any custom scripts loaded from a directory of `*.sieve` files, plus the optional
-/// global/domain scripts run around them (see [`PolicyEngine::evaluate_for_list`]).
+/// global/domain scripts run around them (see [`PolicyEngine::evaluate_before`] and
+/// [`PolicyEngine::evaluate_after`]).
 pub struct PolicyEngine {
     engine: SieveEngine,
     loop_check: Arc<Sieve>,
     duplicate_check: Arc<Sieve>,
+    list_headers: Arc<Sieve>,
     policies: HashMap<String, Arc<Sieve>>,
     global_before: Option<Arc<Sieve>>,
     global_after: Option<Arc<Sieve>>,
@@ -198,6 +208,10 @@ impl PolicyEngine {
             "duplicate",
             include_str!("builtin_policies/duplicate.sieve"),
         )?;
+        let list_headers = compile_builtin(
+            "list-headers",
+            include_str!("builtin_policies/list-headers.sieve"),
+        )?;
 
         let mut policies = HashMap::new();
         for (name, script) in BUILTIN_SCRIPTS {
@@ -207,6 +221,7 @@ impl PolicyEngine {
             engine,
             loop_check,
             duplicate_check,
+            list_headers,
             policies,
             global_before: None,
             global_after: None,
@@ -215,14 +230,14 @@ impl PolicyEngine {
     }
 
     /// Compile and attach the global "before" script, run ahead of every list's own policy,
-    /// regardless of domain — see [`PolicyEngine::evaluate_for_list`].
+    /// regardless of domain — see [`PolicyEngine::evaluate_before`].
     pub fn with_global_before(mut self, path: &Path) -> Result<Self> {
         self.global_before = Some(self.compile_file(path, "global before")?);
         Ok(self)
     }
 
     /// Compile and attach the global "after" script, run after every list's own policy,
-    /// regardless of domain — see [`PolicyEngine::evaluate_for_list`].
+    /// regardless of domain — see [`PolicyEngine::evaluate_after`].
     pub fn with_global_after(mut self, path: &Path) -> Result<Self> {
         self.global_after = Some(self.compile_file(path, "global after")?);
         Ok(self)
@@ -307,7 +322,7 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
     ) -> Result<bool> {
-        let outcome = self
+        let run = self
             .run_script(
                 &self.loop_check,
                 "loop",
@@ -319,7 +334,7 @@ impl PolicyEngine {
                 &NoDuplicates,
             )
             .await?;
-        Ok(matches!(outcome, SieveOutcome::Discard))
+        Ok(matches!(run.outcome, SieveOutcome::Discard))
     }
 
     /// Run the built-in duplicate check (`duplicate.sieve`, the RFC 7352 `duplicate` test).
@@ -332,7 +347,7 @@ impl PolicyEngine {
         raw: &[u8],
         duplicates: &dyn DuplicateStore,
     ) -> Result<bool> {
-        let outcome = self
+        let run = self
             .run_script(
                 &self.duplicate_check,
                 "duplicate",
@@ -344,7 +359,34 @@ impl PolicyEngine {
                 duplicates,
             )
             .await?;
-        Ok(matches!(outcome, SieveOutcome::Discard))
+        Ok(matches!(run.outcome, SieveOutcome::Discard))
+    }
+
+    /// Apply the built-in `list-headers.sieve` script to `raw`, prepending the `List-*` headers
+    /// whose values are supplied in `header_env` (see [`crate::transform::list_header_env`]).
+    /// Returns the rewritten message bytes (or `raw` unchanged if the script added nothing).
+    pub async fn apply_list_headers(
+        &self,
+        list_name: &str,
+        list_id: &str,
+        header_env: &[(&str, &str)],
+        raw: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut env = vec![(ENV_LIST, list_name), (ENV_LIST_ID, list_id)];
+        env.extend_from_slice(header_env);
+        let run = self
+            .engine
+            .run(
+                "list-headers",
+                &self.list_headers,
+                raw,
+                "",
+                &env,
+                &NO_LISTS,
+                &NoDuplicates,
+            )
+            .await?;
+        Ok(run.message.unwrap_or_else(|| raw.to_vec()))
     }
 
     /// Evaluate the named policy against a message.
@@ -369,13 +411,13 @@ impl PolicyEngine {
             .await
     }
 
-    /// Run the full policy chain for one inbound post: the global "before" script, this domain's
-    /// "before" script, the named list policy, this domain's "after" script, and the global
-    /// "after" script — see the module docs for exactly how these compose. Any tier that was
-    /// never configured (via [`PolicyEngine::with_global_before`] and friends, or because
-    /// `domain` has no entry) is simply skipped.
+    /// The "before" half of the policy chain, decided at intake: the global "before" script,
+    /// this domain's "before" script, then the named list policy. See the module docs for how
+    /// these compose. Any tier that was never configured (via
+    /// [`PolicyEngine::with_global_before`] and friends, or because `domain` has no entry) is
+    /// simply skipped. The "after" half runs later, in [`PolicyEngine::evaluate_after`].
     #[allow(clippy::too_many_arguments)]
-    pub async fn evaluate_for_list(
+    pub async fn evaluate_before(
         &self,
         policy_name: &str,
         list_name: &str,
@@ -424,20 +466,34 @@ impl PolicyEngine {
             return Ok(decision);
         }
 
-        // An earlier `Moderate` already means the message is held; the list's own policy has
-        // nothing to add, so it only runs while the decision so far is still `Approve`.
+        // An earlier `Moderate` already means the message will be held; the list's own policy
+        // has nothing to add, so it only runs while the decision so far is still `Approve`.
         if matches!(decision, PolicyDecision::Approve) {
             let tier = self
                 .evaluate(policy_name, list_name, list_id, mail_from, raw, sets)
                 .await?;
             decision = merge(decision, tier);
         }
-        if is_terminal(&decision) {
-            return Ok(decision);
-        }
+        Ok(decision)
+    }
 
-        // `after` is the last-word tier: it still runs while the decision is `Approve` or
-        // `Moderate`, and may tighten either one further (e.g. escalate a hold to a reject).
+    /// The "after" half of the policy chain, decided at distribution time — after moderation —
+    /// so it has the final word on a message about to go out (see
+    /// [`crate::pipeline::finalize`]): this domain's "after" script, then the global "after"
+    /// script. It starts from `Approve` (only about-to-distribute messages reach it) and may
+    /// tighten that to a hold, discard, or reject.
+    pub async fn evaluate_after(
+        &self,
+        list_name: &str,
+        list_id: &str,
+        domain: &str,
+        mail_from: &str,
+        raw: &[u8],
+        sets: &MembershipSets,
+    ) -> Result<PolicyDecision> {
+        let domain_scripts = self.domains.get(domain);
+        let mut decision = PolicyDecision::Approve;
+
         if let Some(script) = domain_scripts.and_then(|d| d.after.as_ref()) {
             let tier = self
                 .run_tier(
@@ -486,7 +542,7 @@ impl PolicyEngine {
     ) -> Result<PolicyDecision> {
         // A policy tier never tracks duplicates; only the built-in duplicate check does (see the
         // `NoDuplicates` docs), so a stray `duplicate` test in a policy script is inert.
-        let outcome = self
+        let run = self
             .run_script(
                 script,
                 name,
@@ -498,7 +554,7 @@ impl PolicyEngine {
                 &NoDuplicates,
             )
             .await?;
-        Ok(decision_from_outcome(outcome))
+        Ok(decision_from_outcome(run.outcome))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -512,7 +568,7 @@ impl PolicyEngine {
         raw: &[u8],
         lists: &dyn ExternalLists,
         duplicates: &dyn DuplicateStore,
-    ) -> Result<SieveOutcome> {
+    ) -> Result<SieveRun> {
         self.engine
             .run(
                 name,

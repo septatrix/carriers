@@ -58,6 +58,14 @@ pub enum SieveOutcome {
     FileInto { folder: String },
 }
 
+/// The result of running one Sieve script: its terminal [`SieveOutcome`], plus the rewritten
+/// message bytes if the script edited headers (`addheader`/`deleteheader`, RFC 5293). `message`
+/// is `None` when the script made no header changes, so the caller keeps the original bytes.
+pub struct SieveRun {
+    pub outcome: SieveOutcome,
+    pub message: Option<Vec<u8>>,
+}
+
 /// A compiler and runtime for Sieve scripts, plus the external `:list` names scripts may
 /// reference.
 pub struct SieveEngine {
@@ -88,7 +96,7 @@ impl SieveEngine {
     }
 
     /// Run `script` (named `name`, for error messages and script-cache keying) against `raw`
-    /// and return the outcome of its terminal action.
+    /// and return its terminal action plus any header-edited message (see [`SieveRun`]).
     ///
     /// `mail_from` sets the envelope sender used by `address`/`envelope` tests; `env_vars` are
     /// exposed to the script via the "environment" extension; `lists` answers `:list` tests;
@@ -103,7 +111,7 @@ impl SieveEngine {
         env_vars: &[(&str, &str)],
         lists: &dyn ExternalLists,
         duplicates: &dyn DuplicateStore,
-    ) -> Result<SieveOutcome> {
+    ) -> Result<SieveRun> {
         let mut instance = self.runtime.filter(raw);
         if !mail_from.is_empty() {
             instance.set_envelope(Envelope::From, mail_from.to_string());
@@ -113,6 +121,7 @@ impl SieveEngine {
         }
 
         let mut outcome = None;
+        let mut message = None;
         let mut input = Input::script(Script::Personal(name.to_string()), script.clone());
         while let Some(event) = instance.run(input) {
             let event = event
@@ -139,6 +148,13 @@ impl SieveEngine {
                         )));
                     }
                 }
+                // The message the script rebuilt after an `addheader`/`deleteheader` edit. The
+                // original headers and body are copied verbatim, so a prepended header leaves the
+                // author's DKIM signature intact.
+                Event::CreatedMessage { message: bytes, .. } => {
+                    message = Some(bytes);
+                    true.into()
+                }
                 Event::Discard => {
                     outcome.get_or_insert(SieveOutcome::Discard);
                     true.into()
@@ -155,7 +171,10 @@ impl SieveEngine {
                 _ => true.into(),
             };
         }
-        // No decisive action ran: implicit keep.
-        Ok(outcome.unwrap_or(SieveOutcome::Keep))
+        Ok(SieveRun {
+            // No decisive action ran: implicit keep.
+            outcome: outcome.unwrap_or(SieveOutcome::Keep),
+            message,
+        })
     }
 }

@@ -13,7 +13,7 @@ use crate::policy::{MembershipSets, PolicyDecision, PolicyEngine};
 use crate::sieve_engine::DuplicateStore;
 use crate::sign::{Ingress, sign_and_seal};
 use crate::store::Store;
-use crate::transform::augment;
+use crate::transform;
 
 /// A message that is ready to be distributed to the list's subscribers.
 pub struct Prepared {
@@ -72,10 +72,11 @@ pub fn decode_verp(address: &str) -> Option<(String, String)> {
     Some((format!("{base_local}@{domain}"), recipient))
 }
 
-/// Ingest an inbound post: discard loops/duplicates, run the full policy chain (global/domain
-/// scripts wrapped around the list's own posting policy — see
-/// [`crate::policy::PolicyEngine::evaluate_for_list`]) to decide whether to distribute, hold for
-/// moderation, discard, or reject it, and prepare the message when it may go out now.
+/// Ingest an inbound post: discard loops/duplicates, then run the "before" half of the policy
+/// chain (the global/domain "before" scripts and the list's own posting policy — see
+/// [`crate::policy::PolicyEngine::evaluate_before`]) to decide whether to distribute, hold for
+/// moderation, discard, or reject it. An approved post goes straight to [`finalize`], which runs
+/// the "after" half and prepares the outgoing message.
 ///
 /// Loop and duplicate detection are themselves built-in Sieve scripts (see
 /// [`crate::policy::PolicyEngine::check_loop`] / [`check_duplicate`](PolicyEngine::check_duplicate)),
@@ -124,12 +125,12 @@ pub async fn intake(
     let sender = from_address(&parsed);
     let sets = membership_sets(members, &list.name).await?;
 
-    // Every list is moderated by a Sieve policy, named by `list.cfg.policy` — either a built-in
-    // name or a custom `<name>.sieve` file — wrapped in the global/domain tiers (see
-    // `PolicyEngine::evaluate_for_list`).
+    // The "before" half of the policy chain decides moderation: the global/domain "before"
+    // scripts and the list's own policy (`list.cfg.policy` — a built-in name or a custom
+    // `<name>.sieve`). The "after" half runs later, in `finalize` (see `evaluate_after`).
     let policy_name = list.cfg.policy.as_str();
     let decision = policy
-        .evaluate_for_list(
+        .evaluate_before(
             policy_name,
             &list.name,
             &list_id,
@@ -142,8 +143,17 @@ pub async fn intake(
 
     match decision {
         PolicyDecision::Approve => {
-            let prepared = finalize(authenticator, members, list, hostname, ingress, raw).await?;
-            Ok(Disposition::Distribute(prepared))
+            finalize(
+                authenticator,
+                store,
+                members,
+                policy,
+                list,
+                hostname,
+                ingress,
+                raw,
+            )
+            .await
         }
         PolicyDecision::Moderate => {
             hold(
@@ -225,35 +235,75 @@ async fn membership_sets(members: &dyn MemberProvider, list_name: &str) -> Resul
     Ok(sets)
 }
 
-/// Transform, sign and seal a message and gather its recipients, without any policy check.
+/// Run the "after" half of the policy chain and, if it still approves, transform, sign and seal
+/// the message and gather its recipients.
 ///
-/// Used both for an immediately-distributable post and when a moderator approves a held one.
+/// Used both for an immediately-approved post and when a moderator approves a held one — either
+/// way this is the message's last stop before delivery, so the "after" scripts (see
+/// [`crate::policy::PolicyEngine::evaluate_after`]) run here, after any moderation, and get the
+/// final say: they may still hold, discard, or reject a message that was otherwise ready to go.
+#[allow(clippy::too_many_arguments)]
 pub async fn finalize(
     authenticator: &MessageAuthenticator,
+    store: &Store,
     members: &dyn MemberProvider,
+    policy: &PolicyEngine,
     list: &List,
     hostname: &str,
     ingress: &Ingress,
     raw: &[u8],
-) -> Result<Prepared> {
-    let recipients = members.recipients(&list.name).await?;
-    let augmented = augment(list, raw);
-    let message = sign_and_seal(authenticator, list, hostname, &augmented, ingress).await?;
+) -> Result<Disposition> {
+    let list_id = list.list_id();
+    let sets = membership_sets(members, &list.name).await?;
 
-    let return_path_local = list
-        .cfg
-        .posting_address
-        .split('@')
-        .next()
-        .unwrap_or("list")
-        .to_string();
+    let decision = policy
+        .evaluate_after(
+            &list.name,
+            &list_id,
+            &list.domain,
+            &ingress.mail_from,
+            raw,
+            &sets,
+        )
+        .await?;
 
-    Ok(Prepared {
-        message,
-        recipients,
-        return_path_local,
-        list_domain: list.domain.clone(),
-    })
+    match decision {
+        PolicyDecision::Approve => {
+            let recipients = members.recipients(&list.name).await?;
+            let owned = transform::list_header_env(list);
+            let header_env: Vec<(&str, &str)> =
+                owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            let augmented = policy
+                .apply_list_headers(&list.name, &list_id, &header_env, raw)
+                .await?;
+            let message = sign_and_seal(authenticator, list, hostname, &augmented, ingress).await?;
+
+            let return_path_local = list
+                .cfg
+                .posting_address
+                .split('@')
+                .next()
+                .unwrap_or("list")
+                .to_string();
+
+            Ok(Disposition::Distribute(Prepared {
+                message,
+                recipients,
+                return_path_local,
+                list_domain: list.domain.clone(),
+            }))
+        }
+        PolicyDecision::Moderate => {
+            let parsed = MessageParser::default().parse(raw);
+            let sender = parsed.as_ref().and_then(from_address);
+            let subject = parsed.as_ref().and_then(|p| p.subject());
+            hold(store, list, ingress, sender.as_deref(), subject, raw).await
+        }
+        PolicyDecision::Discard => Ok(Disposition::Discarded {
+            reason: "discarded by after-policy".into(),
+        }),
+        PolicyDecision::Reject { reason } => Ok(Disposition::Rejected { reason }),
+    }
 }
 
 /// Lowercased `From` address of a parsed message, if present.

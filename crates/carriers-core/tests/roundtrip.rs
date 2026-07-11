@@ -21,7 +21,20 @@ use mail_auth::{
 use carriers_core::crypto::load_dkim_key;
 use carriers_core::keygen;
 use carriers_core::list::{Algorithm, KeyConfig, List};
+use carriers_core::policy::PolicyEngine;
 use carriers_core::transform;
+
+/// Prepend the `List-*` headers via the built-in `list-headers.sieve` script — the same path
+/// `pipeline::finalize` uses — returning `list-headers || raw`.
+async fn augment(list: &List, raw: &[u8]) -> Vec<u8> {
+    let engine = PolicyEngine::new().unwrap();
+    let owned = transform::list_header_env(list);
+    let env: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    engine
+        .apply_list_headers("dev", &list.list_id(), &env, raw)
+        .await
+        .unwrap()
+}
 
 /// A read-only in-memory TXT cache. A cache hit prevents any real DNS query.
 struct StaticCache {
@@ -156,20 +169,21 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-#[test]
-fn augment_preserves_body_and_adds_list_headers() {
+#[tokio::test]
+async fn augment_preserves_body_and_adds_list_headers() {
     let dir = tempfile::tempdir().unwrap();
     let (dkim_file, _) = make_key(dir.path(), "dkim.der");
     let (arc_file, _) = make_key(dir.path(), "arc.der");
     let list = build_list(dir.path(), &dkim_file, &arc_file);
 
-    let augmented = transform::augment(&list, FIXTURE);
+    let augmented = augment(&list, FIXTURE).await;
 
-    // The original bytes appear untouched, and the List-* headers were added.
+    // The original bytes appear untouched, and the List-* headers were added. (mail-parser
+    // canonicalises the field name `List-Id` to `List-ID`; both are equivalent per RFC 5322.)
     assert!(contains(&augmented, FIXTURE), "original bytes preserved");
     assert!(contains(
         &augmented,
-        b"List-Id: Dev List <dev.lists.example.org>"
+        b"List-ID: Dev List <dev.lists.example.org>"
     ));
     assert!(contains(
         &augmented,
@@ -228,7 +242,7 @@ async fn author_dkim_survives_and_list_dkim_is_valid() {
 
     // Inbound message with the author's signature, then our List-* headers, then our signature.
     let authored = authored_message(&author_file);
-    let augmented = transform::augment(&list, &authored);
+    let augmented = augment(&list, &authored).await;
     let signature = list.signer().sign(&augmented).unwrap();
     let mut signed = signature.to_header().into_bytes();
     signed.extend_from_slice(&augmented);
@@ -261,7 +275,7 @@ async fn arc_seal_produces_a_valid_chain() {
     let list = build_list(dir.path(), &dkim_file, &arc_file);
     let authenticator = MessageAuthenticator::new_cloudflare().unwrap();
 
-    let augmented = transform::augment(&list, FIXTURE);
+    let augmented = augment(&list, FIXTURE).await;
 
     // No ARC headers present yet -> an empty chain that can be sealed.
     let pre = AuthenticatedMessage::parse(&augmented).unwrap();

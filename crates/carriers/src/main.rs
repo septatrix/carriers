@@ -351,9 +351,24 @@ async fn moderate(config_path: &Path, cmd: ModerateCommand) -> Result<()> {
                 helo: held.helo,
                 mail_from: held.mail_from,
             };
-            let count = smtp::distribute_approved(&state, &list, &ingress, &held.raw).await?;
+            let outcome = smtp::distribute_approved(&state, &list, &ingress, &held.raw).await?;
+            // The held entry is consumed either way — it was distributed, dropped, or re-queued
+            // as a new entry by the "after" policy tier.
             state.store.delete_held(id).await?;
-            println!("approved {id}: distributed to {count} recipient(s)");
+            match outcome {
+                smtp::Outcome::Distributed(count) => {
+                    println!("approved {id}: distributed to {count} recipient(s)")
+                }
+                smtp::Outcome::Held(new_id) => {
+                    println!("approved {id}: re-held for moderation by after-policy as {new_id}")
+                }
+                smtp::Outcome::Discarded(reason) => {
+                    println!("approved {id}: discarded by after-policy ({reason})")
+                }
+                smtp::Outcome::Rejected(reason) => {
+                    println!("approved {id}: rejected by after-policy ({reason})")
+                }
+            }
         }
         ModerateCommand::Reject { id } => {
             let store = open_store(&config).await?;
