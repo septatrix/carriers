@@ -1,44 +1,18 @@
 //! SQLite-backed membership, moderation queue and operational state, using sqlx.
+//!
+//! Schema changes live in `migrations/` (embedded into the binary at compile time via
+//! [`sqlx::migrate!`]) and are applied automatically, and tracked in sqlx's own
+//! `_sqlx_migrations` table, whenever a [`Store`] is opened.
 
 use std::path::Path;
 use std::str::FromStr;
 
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::Result;
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS members (
-    list            TEXT NOT NULL,
-    address         TEXT NOT NULL,
-    -- 1 = subscriber (receives the list); 0 = member who may post but does not receive.
-    subscribed      INTEGER NOT NULL DEFAULT 1,
-    -- 1 = a moderator of the list (exposed to Sieve policies as the `moderators` list).
-    moderator       INTEGER NOT NULL DEFAULT 0,
-    -- Running bounce score; when it reaches the configured threshold, delivery is disabled.
-    bounce_score    REAL NOT NULL DEFAULT 0,
-    bounce_disabled INTEGER NOT NULL DEFAULT 0,
-    last_bounce_at  INTEGER,
-    PRIMARY KEY (list, address)
-);
-CREATE TABLE IF NOT EXISTS seen_messages (
-    list       TEXT NOT NULL,
-    message_id TEXT NOT NULL,
-    seen_at    INTEGER NOT NULL,
-    PRIMARY KEY (list, message_id)
-);
-CREATE TABLE IF NOT EXISTS moderation_queue (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    list        TEXT NOT NULL,
-    mail_from   TEXT NOT NULL,
-    helo        TEXT NOT NULL,
-    remote_ip   TEXT NOT NULL,
-    sender      TEXT,
-    subject     TEXT,
-    raw         BLOB NOT NULL,
-    received_at INTEGER NOT NULL
-);
-";
+static MIGRATOR: Migrator = sqlx::migrate!();
 
 /// A member of a list, with their roles and bounce state.
 pub struct Member {
@@ -52,16 +26,6 @@ pub struct Member {
     /// True if delivery has been disabled due to bounces.
     pub bounce_disabled: bool,
 }
-
-/// Idempotent column additions, so databases created by earlier versions gain the newer
-/// columns. Errors (e.g. "duplicate column") are ignored.
-const MIGRATIONS: &[&str] = &[
-    "ALTER TABLE members ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1",
-    "ALTER TABLE members ADD COLUMN moderator INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE members ADD COLUMN bounce_score REAL NOT NULL DEFAULT 0",
-    "ALTER TABLE members ADD COLUMN bounce_disabled INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE members ADD COLUMN last_bounce_at INTEGER",
-];
 
 /// A summary row of the moderation queue (without the message body).
 pub struct HeldSummary {
@@ -114,14 +78,7 @@ impl Store {
     }
 
     async fn init(pool: SqlitePool) -> Result<Self> {
-        sqlx::raw_sql(SCHEMA).execute(&pool).await?;
-        for migration in MIGRATIONS {
-            // Best-effort: a "duplicate column" error just means it is already present.
-            // These are audited, static DDL literals, hence AssertSqlSafe.
-            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(*migration))
-                .execute(&pool)
-                .await;
-        }
+        MIGRATOR.run(&pool).await.map_err(sqlx::Error::from)?;
         Ok(Store { pool })
     }
 
