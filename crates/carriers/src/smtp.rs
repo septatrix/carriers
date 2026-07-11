@@ -15,12 +15,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
+use carriers_core::Error as CoreError;
 use carriers_core::bounce::{self, BounceKind};
 use carriers_core::config::Protocol;
 use carriers_core::list::List;
-use carriers_core::pipeline::{self, decode_verp, Disposition};
+use carriers_core::pipeline::{self, Disposition, decode_verp};
 use carriers_core::sign::Ingress;
-use carriers_core::Error as CoreError;
 
 use crate::deliver::deliver;
 use crate::state::AppState;
@@ -200,13 +200,13 @@ enum Recipient {
 
 /// Classify a RCPT TO address as a bounce (VERP) address or a post to a list address.
 fn classify_recipient(state: &AppState, address: &str) -> Option<Recipient> {
-    if let Some((base, recipient)) = decode_verp(address) {
-        if let Some(list) = state.list_for_address(&base) {
-            return Some(Recipient::Bounce {
-                list: list.clone(),
-                address: recipient,
-            });
-        }
+    if let Some((base, recipient)) = decode_verp(address)
+        && let Some(list) = state.list_for_address(&base)
+    {
+        return Some(Recipient::Bounce {
+            list: list.clone(),
+            address: recipient,
+        });
     }
     state
         .list_for_address(address)

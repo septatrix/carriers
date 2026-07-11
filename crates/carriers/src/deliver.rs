@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::warn;
 
 use carriers_core::config::Smarthost;
-use carriers_core::pipeline::{verp, Prepared};
+use carriers_core::pipeline::{Prepared, verp};
 use mail_send::smtp::message::Message;
 use mail_send::{SmtpClient, SmtpClientBuilder};
 

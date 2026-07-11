@@ -6,12 +6,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::info;
 
+use carriers_core::MessageAuthenticator;
 use carriers_core::config::Config;
 use carriers_core::list::List;
 use carriers_core::member::{MemberProvider, SqliteMemberProvider};
 use carriers_core::policy::PolicyEngine;
 use carriers_core::store::Store;
-use carriers_core::MessageAuthenticator;
 
 pub struct AppState {
     pub config: Config,

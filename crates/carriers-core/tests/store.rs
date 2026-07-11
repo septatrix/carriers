@@ -22,23 +22,31 @@ async fn subscriber_and_poster_roles_are_independent() {
         .unwrap();
 
     // Both are recorded members; roles are independent.
-    assert!(provider
-        .is_member("dev", "alice@example.com")
-        .await
-        .unwrap());
+    assert!(
+        provider
+            .is_member("dev", "alice@example.com")
+            .await
+            .unwrap()
+    );
     assert!(provider.is_member("dev", "bot@example.net").await.unwrap());
-    assert!(provider
-        .is_subscriber("dev", "alice@example.com")
-        .await
-        .unwrap());
-    assert!(!provider
-        .is_poster("dev", "alice@example.com")
-        .await
-        .unwrap());
-    assert!(!provider
-        .is_subscriber("dev", "bot@example.net")
-        .await
-        .unwrap());
+    assert!(
+        provider
+            .is_subscriber("dev", "alice@example.com")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !provider
+            .is_poster("dev", "alice@example.com")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !provider
+            .is_subscriber("dev", "bot@example.net")
+            .await
+            .unwrap()
+    );
     assert!(provider.is_poster("dev", "bot@example.net").await.unwrap());
     assert_eq!(
         provider.recipients("dev").await.unwrap(),
@@ -52,17 +60,21 @@ async fn subscriber_and_poster_roles_are_independent() {
         .add("dev", "bot@example.net", true, true, false)
         .await
         .unwrap();
-    assert!(provider
-        .is_subscriber("dev", "bot@example.net")
-        .await
-        .unwrap());
+    assert!(
+        provider
+            .is_subscriber("dev", "bot@example.net")
+            .await
+            .unwrap()
+    );
     assert!(provider.is_poster("dev", "bot@example.net").await.unwrap());
 
     provider.remove("dev", "alice@example.com").await.unwrap();
-    assert!(!provider
-        .is_member("dev", "alice@example.com")
-        .await
-        .unwrap());
+    assert!(
+        !provider
+            .is_member("dev", "alice@example.com")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -130,10 +142,12 @@ async fn bounces_disable_delivery_then_enable_restores_it() {
     );
 
     // Re-enabling clears the score and restores delivery.
-    assert!(store
-        .enable_member("dev", "alice@example.com")
-        .await
-        .unwrap());
+    assert!(
+        store
+            .enable_member("dev", "alice@example.com")
+            .await
+            .unwrap()
+    );
     assert_eq!(
         store.subscribers("dev").await.unwrap(),
         vec!["alice@example.com".to_string()]

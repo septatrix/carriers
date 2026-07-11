@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use carriers_core::config::Config;
@@ -19,7 +19,7 @@ use carriers_core::member::{MemberProvider, SqliteMemberProvider};
 use carriers_core::sign::Ingress;
 use carriers_core::store::Store;
 
-use crate::state::{load_lists, load_policy_engine, AppState};
+use crate::state::{AppState, load_lists, load_policy_engine};
 
 #[derive(Parser)]
 #[command(

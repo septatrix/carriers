@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::list::List;
 use crate::member::MemberProvider;
 use crate::policy::{MembershipSets, PolicyDecision, PolicyEngine};
-use crate::sign::{sign_and_seal, Ingress};
+use crate::sign::{Ingress, sign_and_seal};
 use crate::store::Store;
 use crate::transform::augment;
 
@@ -90,24 +90,23 @@ pub async fn intake(
         .ok_or_else(|| Error::Unparseable("failed to parse RFC 5322 message".into()))?;
 
     // Loop guard: refuse a message that already carries our List-Id.
-    if let Some(value) = parsed.header(HeaderName::ListId) {
-        if value
+    if let Some(value) = parsed.header(HeaderName::ListId)
+        && value
             .as_text()
             .is_some_and(|text| text.contains(&list.list_id()))
-        {
-            return Ok(Disposition::Discarded {
-                reason: "message already carries this List-Id (loop)".into(),
-            });
-        }
+    {
+        return Ok(Disposition::Discarded {
+            reason: "message already carries this List-Id (loop)".into(),
+        });
     }
 
     // Duplicate suppression by Message-ID.
-    if let Some(message_id) = parsed.message_id() {
-        if !store.record_message(&list.name, message_id).await? {
-            return Ok(Disposition::Discarded {
-                reason: format!("duplicate Message-ID `{message_id}`"),
-            });
-        }
+    if let Some(message_id) = parsed.message_id()
+        && !store.record_message(&list.name, message_id).await?
+    {
+        return Ok(Disposition::Discarded {
+            reason: format!("duplicate Message-ID `{message_id}`"),
+        });
     }
 
     let sender = from_address(&parsed);
