@@ -37,11 +37,25 @@
 //! else { reject "Only subscribers and posters may write to this list."; }
 //! ```
 //!
+//! ## Built-in loop and duplicate checks
+//!
+//! Two further built-in scripts run ahead of everything else, once per inbound message, via
+//! [`PolicyEngine::check_loop`] and [`PolicyEngine::check_duplicate`]:
+//!
+//! - `loop.sieve` — a header check: if the message already carries this list's own `List-Id`
+//!   (exposed to the script as the `vnd.carriers.list_id` environment variable) it has looped
+//!   back through the list and is discarded.
+//! - `duplicate.sieve` — the RFC 7352 `duplicate` test: a message whose `Message-ID` this list
+//!   has already seen is discarded. The seen-set is answered by a [`DuplicateStore`].
+//!
+//! These are ordinary Sieve scripts (embedded via `include_str!`) rather than hand-written Rust,
+//! so the loop/dedup rules live in the same place, and same language, as every other policy.
+//!
 //! ## Global policy
 //!
 //! Further, optional scripts (see [`PolicyEngine::evaluate_for_list`]) may run for *every* list,
 //! wrapped around that list's own `policy`: a global one, plus an additional one per list
-//! domain. All of these run after loop/duplicate detection, once the current list is already
+//! domain. All of these run after the loop/duplicate checks, once the current list is already
 //! known, so they still see that list's membership sets — unlike the list-independent tier
 //! sketched in the README's roadmap, which would run before a list is even resolved.
 //!
@@ -69,12 +83,18 @@ use std::sync::Arc;
 use sieve::Sieve;
 
 use crate::error::{Error, Result};
-use crate::sieve_engine::{ExternalLists, SieveEngine, SieveOutcome};
+use crate::sieve_engine::{DuplicateStore, ExternalLists, NoDuplicates, SieveEngine, SieveOutcome};
 
 /// External list names exposed to policy scripts via the Sieve `:list` match.
 pub const LIST_SUBSCRIBERS: &str = "subscribers";
 pub const LIST_POSTERS: &str = "posters";
 pub const LIST_MODERATORS: &str = "moderators";
+
+/// Environment variable exposing the current list's short name to scripts.
+pub const ENV_LIST: &str = "vnd.carriers.list";
+/// Environment variable exposing the current list's `List-Id` to scripts (used by the built-in
+/// loop check).
+pub const ENV_LIST_ID: &str = "vnd.carriers.list_id";
 
 /// Names of the built-in policies. These are reserved: an administrator's `<name>.sieve` file
 /// may not use them.
@@ -150,11 +170,13 @@ struct DomainScripts {
     after: Option<Arc<Sieve>>,
 }
 
-/// A registry of compiled Sieve policies: the built-ins plus any custom scripts loaded from a
-/// directory of `*.sieve` files, plus the optional global/domain scripts run around them (see
-/// [`PolicyEngine::evaluate_for_list`]).
+/// A registry of compiled Sieve policies: the built-in loop/dedup checks and posting policies,
+/// plus any custom scripts loaded from a directory of `*.sieve` files, plus the optional
+/// global/domain scripts run around them (see [`PolicyEngine::evaluate_for_list`]).
 pub struct PolicyEngine {
     engine: SieveEngine,
+    loop_check: Arc<Sieve>,
+    duplicate_check: Arc<Sieve>,
     policies: HashMap<String, Arc<Sieve>>,
     global_before: Option<Arc<Sieve>>,
     global_after: Option<Arc<Sieve>>,
@@ -162,18 +184,29 @@ pub struct PolicyEngine {
 }
 
 impl PolicyEngine {
-    /// An engine with only the built-in policies compiled.
+    /// An engine with only the built-in scripts compiled.
     pub fn new() -> Result<Self> {
         let engine = SieveEngine::new(&[LIST_SUBSCRIBERS, LIST_POSTERS, LIST_MODERATORS]);
+        let compile_builtin = |name: &str, src: &str| {
+            engine
+                .compile(src.as_bytes())
+                .map_err(|e| Error::Config(format!("compiling built-in `{name}`: {e}")))
+        };
+
+        let loop_check = compile_builtin("loop", include_str!("builtin_policies/loop.sieve"))?;
+        let duplicate_check = compile_builtin(
+            "duplicate",
+            include_str!("builtin_policies/duplicate.sieve"),
+        )?;
+
         let mut policies = HashMap::new();
         for (name, script) in BUILTIN_SCRIPTS {
-            let compiled = engine
-                .compile(script.as_bytes())
-                .map_err(|e| Error::Config(format!("compiling built-in policy `{name}`: {e}")))?;
-            policies.insert((*name).to_string(), compiled);
+            policies.insert((*name).to_string(), compile_builtin(name, script)?);
         }
         Ok(PolicyEngine {
             engine,
+            loop_check,
+            duplicate_check,
             policies,
             global_before: None,
             global_after: None,
@@ -262,14 +295,68 @@ impl PolicyEngine {
             .filter(|name| !is_builtin(name))
     }
 
+    /// Run the built-in loop check (`loop.sieve`): a header check against this list's own
+    /// `List-Id`. Returns `true` if the message loops back through the list and must be dropped.
+    ///
+    /// `list_id` is the list's `List-Id` value, exposed to the script as the
+    /// `vnd.carriers.list_id` environment variable.
+    pub async fn check_loop(
+        &self,
+        list_name: &str,
+        list_id: &str,
+        mail_from: &str,
+        raw: &[u8],
+    ) -> Result<bool> {
+        let outcome = self
+            .run_script(
+                &self.loop_check,
+                "loop",
+                list_name,
+                list_id,
+                mail_from,
+                raw,
+                &NO_LISTS,
+                &NoDuplicates,
+            )
+            .await?;
+        Ok(matches!(outcome, SieveOutcome::Discard))
+    }
+
+    /// Run the built-in duplicate check (`duplicate.sieve`, the RFC 7352 `duplicate` test).
+    /// Returns `true` if `duplicates` reports this message's `Message-ID` as already seen.
+    pub async fn check_duplicate(
+        &self,
+        list_name: &str,
+        list_id: &str,
+        mail_from: &str,
+        raw: &[u8],
+        duplicates: &dyn DuplicateStore,
+    ) -> Result<bool> {
+        let outcome = self
+            .run_script(
+                &self.duplicate_check,
+                "duplicate",
+                list_name,
+                list_id,
+                mail_from,
+                raw,
+                &NO_LISTS,
+                duplicates,
+            )
+            .await?;
+        Ok(matches!(outcome, SieveOutcome::Discard))
+    }
+
     /// Evaluate the named policy against a message.
     ///
-    /// `list_name` is exposed to the script as the `vnd.carriers.list` environment variable;
-    /// `mail_from` is the envelope sender; `sets` resolves the membership `:list` tests.
-    pub fn evaluate(
+    /// `list_name`/`list_id` are exposed to the script as the `vnd.carriers.list` /
+    /// `vnd.carriers.list_id` environment variables; `mail_from` is the envelope sender; `sets`
+    /// resolves the membership `:list` tests.
+    pub async fn evaluate(
         &self,
         name: &str,
         list_name: &str,
+        list_id: &str,
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
@@ -278,7 +365,8 @@ impl PolicyEngine {
             .policies
             .get(name)
             .ok_or_else(|| Error::Config(format!("unknown policy `{name}`")))?;
-        self.run_tier(script, name, list_name, mail_from, raw, sets)
+        self.run_tier(script, name, list_name, list_id, mail_from, raw, sets)
+            .await
     }
 
     /// Run the full policy chain for one inbound post: the global "before" script, this domain's
@@ -286,10 +374,12 @@ impl PolicyEngine {
     /// "after" script — see the module docs for exactly how these compose. Any tier that was
     /// never configured (via [`PolicyEngine::with_global_before`] and friends, or because
     /// `domain` has no entry) is simply skipped.
-    pub fn evaluate_for_list(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate_for_list(
         &self,
         policy_name: &str,
         list_name: &str,
+        list_id: &str,
         domain: &str,
         mail_from: &str,
         raw: &[u8],
@@ -299,20 +389,36 @@ impl PolicyEngine {
         let mut decision = PolicyDecision::Approve;
 
         if let Some(script) = &self.global_before {
-            decision = merge(
-                decision,
-                self.run_tier(script, "global-before", list_name, mail_from, raw, sets)?,
-            );
+            let tier = self
+                .run_tier(
+                    script,
+                    "global-before",
+                    list_name,
+                    list_id,
+                    mail_from,
+                    raw,
+                    sets,
+                )
+                .await?;
+            decision = merge(decision, tier);
         }
         if is_terminal(&decision) {
             return Ok(decision);
         }
 
         if let Some(script) = domain_scripts.and_then(|d| d.before.as_ref()) {
-            decision = merge(
-                decision,
-                self.run_tier(script, "domain-before", list_name, mail_from, raw, sets)?,
-            );
+            let tier = self
+                .run_tier(
+                    script,
+                    "domain-before",
+                    list_name,
+                    list_id,
+                    mail_from,
+                    raw,
+                    sets,
+                )
+                .await?;
+            decision = merge(decision, tier);
         }
         if is_terminal(&decision) {
             return Ok(decision);
@@ -321,10 +427,10 @@ impl PolicyEngine {
         // An earlier `Moderate` already means the message is held; the list's own policy has
         // nothing to add, so it only runs while the decision so far is still `Approve`.
         if matches!(decision, PolicyDecision::Approve) {
-            decision = merge(
-                decision,
-                self.evaluate(policy_name, list_name, mail_from, raw, sets)?,
-            );
+            let tier = self
+                .evaluate(policy_name, list_name, list_id, mail_from, raw, sets)
+                .await?;
+            decision = merge(decision, tier);
         }
         if is_terminal(&decision) {
             return Ok(decision);
@@ -333,42 +439,103 @@ impl PolicyEngine {
         // `after` is the last-word tier: it still runs while the decision is `Approve` or
         // `Moderate`, and may tighten either one further (e.g. escalate a hold to a reject).
         if let Some(script) = domain_scripts.and_then(|d| d.after.as_ref()) {
-            decision = merge(
-                decision,
-                self.run_tier(script, "domain-after", list_name, mail_from, raw, sets)?,
-            );
+            let tier = self
+                .run_tier(
+                    script,
+                    "domain-after",
+                    list_name,
+                    list_id,
+                    mail_from,
+                    raw,
+                    sets,
+                )
+                .await?;
+            decision = merge(decision, tier);
         }
         if is_terminal(&decision) {
             return Ok(decision);
         }
 
         if let Some(script) = &self.global_after {
-            decision = merge(
-                decision,
-                self.run_tier(script, "global-after", list_name, mail_from, raw, sets)?,
-            );
+            let tier = self
+                .run_tier(
+                    script,
+                    "global-after",
+                    list_name,
+                    list_id,
+                    mail_from,
+                    raw,
+                    sets,
+                )
+                .await?;
+            decision = merge(decision, tier);
         }
         Ok(decision)
     }
 
-    fn run_tier(
+    #[allow(clippy::too_many_arguments)]
+    async fn run_tier(
         &self,
         script: &Arc<Sieve>,
         name: &str,
         list_name: &str,
+        list_id: &str,
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
     ) -> Result<PolicyDecision> {
-        let outcome = self.engine.run(
-            name,
-            script,
-            raw,
-            mail_from,
-            &[("vnd.carriers.list", list_name)],
-            sets,
-        )?;
+        // A policy tier never tracks duplicates; only the built-in duplicate check does (see the
+        // `NoDuplicates` docs), so a stray `duplicate` test in a policy script is inert.
+        let outcome = self
+            .run_script(
+                script,
+                name,
+                list_name,
+                list_id,
+                mail_from,
+                raw,
+                sets,
+                &NoDuplicates,
+            )
+            .await?;
         Ok(decision_from_outcome(outcome))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_script(
+        &self,
+        script: &Arc<Sieve>,
+        name: &str,
+        list_name: &str,
+        list_id: &str,
+        mail_from: &str,
+        raw: &[u8],
+        lists: &dyn ExternalLists,
+        duplicates: &dyn DuplicateStore,
+    ) -> Result<SieveOutcome> {
+        self.engine
+            .run(
+                name,
+                script,
+                raw,
+                mail_from,
+                &[(ENV_LIST, list_name), (ENV_LIST_ID, list_id)],
+                lists,
+                duplicates,
+            )
+            .await
+    }
+}
+
+/// An [`ExternalLists`] with no lists — for the built-in loop/dedup checks, which never use the
+/// `:list` test.
+static NO_LISTS: NoLists = NoLists;
+
+struct NoLists;
+
+impl ExternalLists for NoLists {
+    fn contains(&self, _list: &str, _value: &str) -> bool {
+        false
     }
 }
 

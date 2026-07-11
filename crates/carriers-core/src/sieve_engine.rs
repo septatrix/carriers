@@ -5,14 +5,40 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use sieve::{Compiler, Envelope, Event, Input, Runtime, Script, Sieve};
 
 use crate::error::{Error, Result};
 
 /// Resolves Sieve's `:list` external-list tests (e.g. `address :list "from" "subscribers"`)
 /// against caller-specific data. Implemented by the caller — see `policy::MembershipSets`.
-pub trait ExternalLists {
+///
+/// `Send + Sync` because a `&dyn ExternalLists` is held across the `await` in [`SieveEngine::run`].
+pub trait ExternalLists: Send + Sync {
     fn contains(&self, list: &str, value: &str) -> bool;
+}
+
+/// Resolves Sieve's `duplicate` test (RFC 7352): tracks message identifiers that have been seen
+/// so a repeat can be detected. Implemented by the caller against durable storage.
+#[async_trait]
+pub trait DuplicateStore: Send + Sync {
+    /// Whether `id` has already been seen (within the last `expiry` seconds), recording it as
+    /// seen now. Returns `true` for a repeat (the `duplicate` test then matches), `false` the
+    /// first time an `id` is presented.
+    async fn seen_before(&self, id: &str, expiry: u64) -> Result<bool>;
+}
+
+/// A [`DuplicateStore`] that records nothing and never reports a duplicate. Used for script tiers
+/// that have no business tracking duplicates (everything except the built-in dedup check), so a
+/// stray `duplicate` test there is simply inert rather than sharing — and corrupting — the
+/// dedup state owned by that one check.
+pub struct NoDuplicates;
+
+#[async_trait]
+impl DuplicateStore for NoDuplicates {
+    async fn seen_before(&self, _id: &str, _expiry: u64) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// The terminal action a Sieve script took, decoupled from what it means to the caller.
@@ -65,8 +91,10 @@ impl SieveEngine {
     /// and return the outcome of its terminal action.
     ///
     /// `mail_from` sets the envelope sender used by `address`/`envelope` tests; `env_vars` are
-    /// exposed to the script via the "environment" extension; `lists` answers `:list` tests.
-    pub fn run(
+    /// exposed to the script via the "environment" extension; `lists` answers `:list` tests;
+    /// `duplicates` answers the `duplicate` test.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run(
         &self,
         name: &str,
         script: &Arc<Sieve>,
@@ -74,6 +102,7 @@ impl SieveEngine {
         mail_from: &str,
         env_vars: &[(&str, &str)],
         lists: &dyn ExternalLists,
+        duplicates: &dyn DuplicateStore,
     ) -> Result<SieveOutcome> {
         let mut instance = self.runtime.filter(raw);
         if !mail_from.is_empty() {
@@ -97,7 +126,10 @@ impl SieveEngine {
                     .iter()
                     .any(|list| values.iter().any(|value| lists.contains(list, value)))
                     .into(),
-                Event::MailboxExists { .. } | Event::DuplicateId { .. } => false.into(),
+                Event::DuplicateId { id, expiry, .. } => {
+                    duplicates.seen_before(&id, expiry).await?.into()
+                }
+                Event::MailboxExists { .. } => false.into(),
                 Event::IncludeScript { optional, .. } => {
                     if optional {
                         Input::False

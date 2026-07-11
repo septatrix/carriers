@@ -202,6 +202,19 @@ mailing-list semantics. `policy` module builds on it: it interprets the engine's
 `PolicyDecision`, and ships the built-in policies as standalone `<name>.sieve` files (embedded
 into the binary at compile time with `include_str!`) rather than inline Rust string literals.
 
+### Loop and duplicate detection
+
+Loop and duplicate suppression are themselves built-in Sieve scripts (embedded the same way),
+run ahead of the policy chain on every message:
+
+- **Loop detection** is a header check: `loop.sieve` discards a message that already carries this
+  list's own `List-Id` (exposed to the script as the `vnd.carriers.list_id` environment
+  variable), meaning it has already been distributed through the list and is looping back.
+- **Duplicate detection** uses the standard Sieve `duplicate` extension (RFC 7352):
+  `duplicate.sieve` discards a message whose `Message-ID` this list has already seen. The
+  seen-`Message-ID` set is stored per list in SQLite; a message with no `Message-ID` is never
+  treated as a duplicate.
+
 ### Global policy
 
 Alongside each list's own `policy`, further optional Sieve scripts can run wrapped around it,
@@ -222,10 +235,11 @@ global before -> domain before -> the list's own policy -> domain after -> globa
 ```
 
 Any step that isn't configured is skipped. Set paths explicitly, or for the two instance-wide
-scripts, drop a `global.sieve` / `global-after.sieve` file next to `carriers.toml` and it's
-picked up automatically — domain-scoped scripts have no such auto-discovery and must be listed
-explicitly. See [`examples/carriers.toml`](examples/carriers.toml)'s `[global_policy]` table,
-and the example scripts [`examples/global.sieve`](examples/global.sieve) (instance-wide before),
+scripts, drop a `global-before.sieve` / `global-after.sieve` file next to `carriers.toml` and
+it's picked up automatically — domain-scoped scripts have no such auto-discovery and must be
+listed explicitly. See [`examples/carriers.toml`](examples/carriers.toml)'s `[global_policy]`
+table, and the example scripts
+[`examples/global-before.sieve`](examples/global-before.sieve) (instance-wide before),
 [`examples/global-after.sieve`](examples/global-after.sieve) (instance-wide after), and
 [`examples/lists.example.com-after.sieve`](examples/lists.example.com-after.sieve) (a
 domain-scoped after script, for `lists.example.com`).

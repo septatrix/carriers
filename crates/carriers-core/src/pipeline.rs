@@ -2,13 +2,15 @@
 
 use std::collections::HashSet;
 
+use async_trait::async_trait;
 use mail_auth::MessageAuthenticator;
-use mail_parser::{HeaderName, Message, MessageParser};
+use mail_parser::{Message, MessageParser};
 
 use crate::error::{Error, Result};
 use crate::list::List;
 use crate::member::MemberProvider;
 use crate::policy::{MembershipSets, PolicyDecision, PolicyEngine};
+use crate::sieve_engine::DuplicateStore;
 use crate::sign::{Ingress, sign_and_seal};
 use crate::store::Store;
 use crate::transform::augment;
@@ -74,6 +76,10 @@ pub fn decode_verp(address: &str) -> Option<(String, String)> {
 /// scripts wrapped around the list's own posting policy — see
 /// [`crate::policy::PolicyEngine::evaluate_for_list`]) to decide whether to distribute, hold for
 /// moderation, discard, or reject it, and prepare the message when it may go out now.
+///
+/// Loop and duplicate detection are themselves built-in Sieve scripts (see
+/// [`crate::policy::PolicyEngine::check_loop`] / [`check_duplicate`](PolicyEngine::check_duplicate)),
+/// run ahead of the policy chain.
 #[allow(clippy::too_many_arguments)]
 pub async fn intake(
     authenticator: &MessageAuthenticator,
@@ -89,23 +95,29 @@ pub async fn intake(
         .parse(raw)
         .ok_or_else(|| Error::Unparseable("failed to parse RFC 5322 message".into()))?;
 
-    // Loop guard: refuse a message that already carries our List-Id.
-    if let Some(value) = parsed.header(HeaderName::ListId)
-        && value
-            .as_text()
-            .is_some_and(|text| text.contains(&list.list_id()))
+    let list_id = list.list_id();
+
+    // Loop guard: a message already carrying our List-Id (built-in `loop.sieve` header check).
+    if policy
+        .check_loop(&list.name, &list_id, &ingress.mail_from, raw)
+        .await?
     {
         return Ok(Disposition::Discarded {
             reason: "message already carries this List-Id (loop)".into(),
         });
     }
 
-    // Duplicate suppression by Message-ID.
-    if let Some(message_id) = parsed.message_id()
-        && !store.record_message(&list.name, message_id).await?
+    // Duplicate suppression by Message-ID (built-in `duplicate.sieve`, RFC 7352).
+    let duplicates = StoreDuplicates {
+        store,
+        list: &list.name,
+    };
+    if policy
+        .check_duplicate(&list.name, &list_id, &ingress.mail_from, raw, &duplicates)
+        .await?
     {
         return Ok(Disposition::Discarded {
-            reason: format!("duplicate Message-ID `{message_id}`"),
+            reason: "duplicate message (Message-ID already seen)".into(),
         });
     }
 
@@ -116,14 +128,17 @@ pub async fn intake(
     // name or a custom `<name>.sieve` file — wrapped in the global/domain tiers (see
     // `PolicyEngine::evaluate_for_list`).
     let policy_name = list.cfg.policy.as_str();
-    let decision = policy.evaluate_for_list(
-        policy_name,
-        &list.name,
-        &list.domain,
-        &ingress.mail_from,
-        raw,
-        &sets,
-    )?;
+    let decision = policy
+        .evaluate_for_list(
+            policy_name,
+            &list.name,
+            &list_id,
+            &list.domain,
+            &ingress.mail_from,
+            raw,
+            &sets,
+        )
+        .await?;
 
     match decision {
         PolicyDecision::Approve => {
@@ -145,6 +160,21 @@ pub async fn intake(
             reason: "discarded by policy".into(),
         }),
         PolicyDecision::Reject { reason } => Ok(Disposition::Rejected { reason }),
+    }
+}
+
+/// Backs the built-in `duplicate` check with the persistent per-list seen-message set. `expiry`
+/// (the Sieve deduplication window) is ignored: carriers records seen `Message-ID`s indefinitely.
+struct StoreDuplicates<'a> {
+    store: &'a Store,
+    list: &'a str,
+}
+
+#[async_trait]
+impl DuplicateStore for StoreDuplicates<'_> {
+    async fn seen_before(&self, id: &str, _expiry: u64) -> Result<bool> {
+        // `record_message` returns true when newly recorded, i.e. not seen before.
+        Ok(!self.store.record_message(self.list, id).await?)
     }
 }
 
