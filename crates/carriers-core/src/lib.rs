@@ -15,6 +15,7 @@ pub mod list;
 pub mod member;
 pub mod pipeline;
 pub mod policy;
+pub mod sieve_engine;
 pub mod sign;
 pub mod store;
 pub mod transform;

@@ -31,11 +31,18 @@ pub enum Disposition {
     Distribute(Prepared),
     /// Held for moderation (already stored in the queue); `id` is the queue entry.
     Held { id: i64 },
-    /// Accepted but not distributed (loop or duplicate). The caller should still reply with a
-    /// 2xx SMTP status (accept), rather than a 5xx rejection, to avoid backscatter — this is
-    /// the three-digit basic SMTP reply code, distinct from the RFC 3463 enhanced status code
+    /// Silently dropped: a loop, a duplicate, or a policy's Sieve `discard`. The sender is told
+    /// nothing about this specific message; the caller should still reply with a 2xx SMTP
+    /// status (accept) rather than a 5xx rejection, to avoid backscatter — this is the
+    /// three-digit basic SMTP reply code, distinct from the RFC 3463 enhanced status code
     /// (itself also written `2.x.x`) that accompanies it in the reply text.
-    Dropped { reason: String },
+    Discarded { reason: String },
+    /// Explicitly refused by a policy's Sieve `reject`/`ereject`, carrying its reason. The
+    /// caller should reply with a permanent (5xx) SMTP status containing this reason — since
+    /// this happens synchronously within the inbound SMTP transaction, it is a real-time
+    /// protocol rejection (the sender's own MTA is responsible for notifying its user), not a
+    /// bounce we generate ourselves, so it does not risk backscatter.
+    Rejected { reason: String },
 }
 
 /// Build a VERP (Variable Envelope Return Path) bounce address encoding the recipient, so a
@@ -63,8 +70,9 @@ pub fn decode_verp(address: &str) -> Option<(String, String)> {
     Some((format!("{base_local}@{domain}"), recipient))
 }
 
-/// Ingest an inbound post: reject loops/duplicates, apply the posting policy (distributing,
-/// holding for moderation, as appropriate), and prepare the message when it may go out now.
+/// Ingest an inbound post: discard loops/duplicates, apply the posting policy (distributing,
+/// holding for moderation, discarding or rejecting, as appropriate), and prepare the message
+/// when it may go out now.
 #[allow(clippy::too_many_arguments)]
 pub async fn intake(
     authenticator: &MessageAuthenticator,
@@ -78,7 +86,7 @@ pub async fn intake(
 ) -> Result<Disposition> {
     let parsed = MessageParser::default()
         .parse(raw)
-        .ok_or_else(|| Error::Rejected("unparseable message".into()))?;
+        .ok_or_else(|| Error::Unparseable("failed to parse RFC 5322 message".into()))?;
 
     // Loop guard: refuse a message that already carries our List-Id.
     if let Some(value) = parsed.header(HeaderName::ListId) {
@@ -86,7 +94,7 @@ pub async fn intake(
             .as_text()
             .is_some_and(|text| text.contains(&list.list_id()))
         {
-            return Ok(Disposition::Dropped {
+            return Ok(Disposition::Discarded {
                 reason: "message already carries this List-Id (loop)".into(),
             });
         }
@@ -95,7 +103,7 @@ pub async fn intake(
     // Duplicate suppression by Message-ID.
     if let Some(message_id) = parsed.message_id() {
         if !store.record_message(&list.name, message_id).await? {
-            return Ok(Disposition::Dropped {
+            return Ok(Disposition::Discarded {
                 reason: format!("duplicate Message-ID `{message_id}`"),
             });
         }
@@ -110,10 +118,13 @@ pub async fn intake(
     let approved = match policy.evaluate(policy_name, &list.name, &ingress.mail_from, raw, &sets)? {
         PolicyDecision::Approve => true,
         PolicyDecision::Moderate => false,
-        PolicyDecision::Reject => {
-            return Ok(Disposition::Dropped {
-                reason: format!("rejected by policy `{policy_name}`"),
+        PolicyDecision::Discard => {
+            return Ok(Disposition::Discarded {
+                reason: format!("discarded by policy `{policy_name}`"),
             });
+        }
+        PolicyDecision::Reject { reason } => {
+            return Ok(Disposition::Rejected { reason });
         }
     };
 

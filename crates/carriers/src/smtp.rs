@@ -246,15 +246,42 @@ async fn post_reply(
             info!(list = %list.name, id, "message held for moderation");
             "250 2.6.0 Message accepted (held for moderation)\r\n".to_string()
         }
-        Ok(Outcome::Dropped(reason)) => {
-            // Accept-and-drop: a 2xx SMTP reply avoids generating backscatter.
-            info!(list = %list.name, reason, "message dropped");
+        Ok(Outcome::Discarded(reason)) => {
+            // Accept-and-drop: a 2xx SMTP reply avoids generating backscatter. The sender is
+            // told nothing beyond "accepted" — that is the point of a silent discard.
+            info!(list = %list.name, reason, "message discarded");
             "250 2.6.0 Message accepted (not distributed)\r\n".to_string()
+        }
+        Ok(Outcome::Rejected(reason)) => {
+            // A real-time SMTP rejection, not a bounce: we are still inside the sender's SMTP
+            // transaction, so refusing here puts the burden of notifying their user on their
+            // own MTA, with no backscatter risk. The reason came from a Sieve `reject` action
+            // in an admin-controlled policy script, but may echo attacker-controlled message
+            // content (e.g. a script that reflects the Subject), so it must not be trusted to
+            // be a single safe line.
+            warn!(list = %list.name, reason, "message rejected by policy");
+            format!("550 5.7.1 {}\r\n", sanitize_smtp_reply_text(&reason))
         }
         Err(err) => {
             error!(list = %list.name, %err, "processing failed");
             "451 4.3.0 Temporary processing failure\r\n".to_string()
         }
+    }
+}
+
+/// Make free-form text safe to embed in a single-line SMTP reply: strip CR/LF (which would
+/// otherwise inject extra reply lines into the protocol stream) and cap the length so the
+/// reply stays comfortably within RFC 5321's line-length expectations.
+fn sanitize_smtp_reply_text(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+        .take(200)
+        .collect();
+    if cleaned.trim().is_empty() {
+        "Message rejected".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -305,7 +332,8 @@ async fn handle_bounce(
 enum Outcome {
     Distributed(usize),
     Held(i64),
-    Dropped(String),
+    Discarded(String),
+    Rejected(String),
 }
 
 async fn handle_one(
@@ -327,8 +355,8 @@ async fn handle_one(
     .await
     {
         Ok(disposition) => disposition,
-        // An unparseable message surfaces as Rejected; accept-and-drop it.
-        Err(CoreError::Rejected(reason)) => return Ok(Outcome::Dropped(reason)),
+        // An unparseable message can't be discarded via Disposition; accept-and-drop it.
+        Err(CoreError::Unparseable(reason)) => return Ok(Outcome::Discarded(reason)),
         Err(other) => return Err(other.into()),
     };
 
@@ -338,7 +366,8 @@ async fn handle_one(
             Ok(Outcome::Distributed(count))
         }
         Disposition::Held { id } => Ok(Outcome::Held(id)),
-        Disposition::Dropped { reason } => Ok(Outcome::Dropped(reason)),
+        Disposition::Discarded { reason } => Ok(Outcome::Discarded(reason)),
+        Disposition::Rejected { reason } => Ok(Outcome::Rejected(reason)),
     }
 }
 

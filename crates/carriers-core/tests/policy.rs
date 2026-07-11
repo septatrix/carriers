@@ -5,14 +5,17 @@ use std::collections::HashSet;
 use carriers_core::policy::{MembershipSets, PolicyDecision, PolicyEngine};
 
 const POLICY: &str = r#"
-require ["envelope", "extlists", "fileinto"];
-# Subscribers post freely; posters are moderated; strangers are rejected.
+require ["envelope", "extlists", "fileinto", "reject"];
+# Subscribers post freely; posters are moderated; a known spammer is silently discarded;
+# everyone else is rejected with a reason.
 if address :list "from" "subscribers" {
     keep;
 } elsif address :list "from" "posters" {
     fileinto "moderate";
-} else {
+} elsif address :is "from" "spammer@evil.example" {
     discard;
+} else {
+    reject "Only subscribers and posters may write to this list.";
 }
 "#;
 
@@ -49,7 +52,7 @@ fn sets() -> MembershipSets {
 }
 
 #[test]
-fn sieve_policy_decides_approve_moderate_reject() {
+fn sieve_policy_decides_approve_moderate_discard_reject() {
     let dir = tempdir();
     write_policy(&dir, "corporate", POLICY);
     let engine = PolicyEngine::load(&dir).unwrap();
@@ -62,10 +65,17 @@ fn sieve_policy_decides_approve_moderate_reject() {
             .unwrap()
     };
 
-    // Subscriber -> approve; poster (not a subscriber) -> moderate; stranger -> reject.
+    // Subscriber -> approve; poster (not a subscriber) -> moderate; known spammer -> silently
+    // discarded; stranger -> rejected with a reason.
     assert_eq!(eval("alice@example.com"), PolicyDecision::Approve);
     assert_eq!(eval("bot@example.net"), PolicyDecision::Moderate);
-    assert_eq!(eval("mallory@evil.example"), PolicyDecision::Reject);
+    assert_eq!(eval("spammer@evil.example"), PolicyDecision::Discard);
+    assert_eq!(
+        eval("mallory@evil.example"),
+        PolicyDecision::Reject {
+            reason: "Only subscribers and posters may write to this list.".to_string()
+        }
+    );
 }
 
 #[test]

@@ -28,7 +28,7 @@ pub enum Error {
     #[error("list not found: {0}")]
     ListNotFound(String),
 
-    /// The message was intentionally not distributed (policy, loop, duplicate).
-    #[error("message rejected: {0}")]
-    Rejected(String),
+    /// The inbound message could not be parsed as an RFC 5322 message.
+    #[error("unparseable message: {0}")]
+    Unparseable(String),
 }

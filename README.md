@@ -146,7 +146,12 @@ Sieve actions:
 
 - `keep;` (or an empty script) — **approve** and distribute now
 - `fileinto "moderate";` — **hold** for moderation
-- `discard;` / `reject "…";` — **reject** (drop)
+- `discard;` — silently **discard**: the message is dropped and the sender's SMTP transaction
+  is accepted (`250`) as if nothing happened, so a spammer isn't told their mail was noticed
+- `reject "…";` / `ereject "…";` — **reject**: the SMTP transaction fails with a `550 5.7.1`
+  and the given reason, so a legitimate sender finds out and can act (e.g. ask to subscribe).
+  The reason is sanitised before being echoed into the SMTP reply (stripped of CR/LF, length
+  capped) since it may indirectly reflect attacker-controlled message content.
 
 Membership is exposed as Sieve external lists, resolved against the *current* list, so one
 global script adapts per mailing list. These are independent flags, not a hierarchy —
@@ -155,14 +160,20 @@ overlap arbitrarily or not at all. The list's short name is available as the
 `vnd.carriers.list` environment variable. `carriers policies` lists the compiled policies.
 
 ```sieve
-require ["envelope", "extlists", "fileinto"];
+require ["envelope", "extlists", "fileinto", "reject"];
 if address :list "from" "subscribers" { keep; }
 elsif address :list "from" "posters"  { fileinto "moderate"; }
-else                                  { discard; }
+else                                  { reject "Only subscribers and posters may write to this list."; }
 ```
 
 > Note: the Sieve engine ([`sieve-rs`](https://github.com/stalwartlabs/sieve)) is AGPL-3.0, so
 > building carriers with policy support links AGPL code into the binary.
+
+The Sieve compile-and-run mechanics (the generic `keep`/`discard`/`reject`/`fileinto` event
+loop, list-membership lookups) live in `carriers-core`'s `sieve_engine` module, independent of
+mailing-list semantics. `policy` module builds on it: it interprets the engine's outcome into a
+`PolicyDecision`, and ships the built-in policies as standalone `<name>.sieve` files (embedded
+into the binary at compile time with `include_str!`) rather than inline Rust string literals.
 
 ## Bounce handling
 

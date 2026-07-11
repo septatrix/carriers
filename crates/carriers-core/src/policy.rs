@@ -6,15 +6,21 @@
 //! at startup.
 //!
 //! The four built-in policies (`open`, `subscribers`, `posters`, `moderated`) are themselves
-//! compiled Sieve scripts (see [`BUILTIN_SCRIPTS`]), so every list — whether it names a
-//! built-in policy or a custom script — is moderated through this one engine, looked up by the
-//! same name.
+//! Sieve scripts, one file each under `src/builtin_policies/` (embedded into the binary at
+//! compile time via `include_str!`, see [`BUILTIN_SCRIPTS`]), so every list — whether it names
+//! a built-in policy or a custom script — is moderated through this one engine, looked up by
+//! the same name. The actual Sieve compiling/running mechanics live in
+//! [`crate::sieve_engine`]; this module only adds the carriers-specific vocabulary on top:
+//! named policies, membership lists, and the decision a script reaches.
 //!
 //! A script decides what happens to a post through ordinary Sieve actions:
 //!
 //! - `keep;` (or doing nothing) — **approve**: distribute the post now.
 //! - `fileinto "moderate";` — **hold** the post for moderation.
-//! - `discard;` or `reject "…";` — **reject** (drop) the post.
+//! - `discard;` — **silently drop** the post; the sender is told nothing.
+//! - `reject "reason";` / `ereject "reason";` — **refuse** the post, replying to the sender's
+//!   MTA with the given reason (a real-time SMTP rejection, not a bounce, so this does not
+//!   generate backscatter).
 //!
 //! Membership is exposed as Sieve external lists, resolved against the *current* list, so a
 //! single global script adapts per mailing list. These are independent flags, not a hierarchy —
@@ -25,19 +31,20 @@
 //! - `moderators` — addresses flagged as moderators.
 //!
 //! ```sieve
-//! require ["envelope", "extlists", "fileinto"];
+//! require ["envelope", "extlists", "fileinto", "reject"];
 //! if address :list "from" "subscribers" { keep; }
 //! elsif address :list "from" "posters" { fileinto "moderate"; }
-//! else { discard; }
+//! else { reject "Only subscribers and posters may write to this list."; }
 //! ```
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use sieve::{Compiler, Envelope, Event, Input, Runtime, Script, Sieve};
+use sieve::Sieve;
 
 use crate::error::{Error, Result};
+use crate::sieve_engine::{ExternalLists, SieveEngine, SieveOutcome};
 
 /// External list names exposed to policy scripts via the Sieve `:list` match.
 pub const LIST_SUBSCRIBERS: &str = "subscribers";
@@ -45,33 +52,27 @@ pub const LIST_POSTERS: &str = "posters";
 pub const LIST_MODERATORS: &str = "moderators";
 
 /// Names of the built-in policies. These are reserved: an administrator's `<name>.sieve` file
-/// may not use them. Each is itself a Sieve script (see [`BUILTIN_SCRIPTS`]), so built-in and
-/// custom policies share one evaluation path.
+/// may not use them.
 pub const BUILTIN_OPEN: &str = "open";
 pub const BUILTIN_SUBSCRIBERS: &str = "subscribers";
 pub const BUILTIN_POSTERS: &str = "posters";
 pub const BUILTIN_MODERATED: &str = "moderated";
 
-/// The built-in policies, expressed as Sieve scripts, as `(name, script)` pairs.
+/// The built-in policies, each a standalone Sieve script embedded at compile time, as
+/// `(name, source)` pairs.
 const BUILTIN_SCRIPTS: &[(&str, &str)] = &[
-    // Anyone may post: an empty script leaves the implicit keep in place (approve).
-    (BUILTIN_OPEN, "# open: anyone may post\n"),
-    // Subscribers post directly; anyone else is held for moderation.
+    (BUILTIN_OPEN, include_str!("builtin_policies/open.sieve")),
     (
         BUILTIN_SUBSCRIBERS,
-        "require [\"extlists\", \"fileinto\"];\n\
-         if not address :list \"from\" \"subscribers\" { fileinto \"moderate\"; }\n",
+        include_str!("builtin_policies/subscribers.sieve"),
     ),
-    // Posters post directly (independent of subscription); anyone else is held for moderation.
     (
         BUILTIN_POSTERS,
-        "require [\"extlists\", \"fileinto\"];\n\
-         if not address :list \"from\" \"posters\" { fileinto \"moderate\"; }\n",
+        include_str!("builtin_policies/posters.sieve"),
     ),
-    // Every post is held for moderation.
     (
         BUILTIN_MODERATED,
-        "require [\"fileinto\"];\nfileinto \"moderate\";\n",
+        include_str!("builtin_policies/moderated.sieve"),
     ),
 ];
 
@@ -81,14 +82,17 @@ pub fn is_builtin(name: &str) -> bool {
 }
 
 /// The decision a policy reached for a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
     /// Distribute the message now.
     Approve,
     /// Hold the message for moderation.
     Moderate,
-    /// Reject (drop) the message.
-    Reject,
+    /// Silently drop the message (Sieve `discard`); the sender is told nothing.
+    Discard,
+    /// Refuse the message with a reason (Sieve `reject`/`ereject`), to be surfaced to the
+    /// sender as a real-time SMTP rejection.
+    Reject { reason: String },
 }
 
 /// Membership facts for the current list, resolved before evaluating a (synchronous) script.
@@ -101,7 +105,7 @@ pub struct MembershipSets {
     pub moderators: HashSet<String>,
 }
 
-impl MembershipSets {
+impl ExternalLists for MembershipSets {
     fn contains(&self, list: &str, value: &str) -> bool {
         let value = value.to_ascii_lowercase();
         match list {
@@ -113,36 +117,31 @@ impl MembershipSets {
     }
 }
 
-/// A registry of compiled Sieve policies loaded from a directory of `*.sieve` files.
+/// A registry of compiled Sieve policies: the built-ins plus any custom scripts loaded from a
+/// directory of `*.sieve` files.
 pub struct PolicyEngine {
-    runtime: Runtime,
+    engine: SieveEngine,
     policies: HashMap<String, Arc<Sieve>>,
 }
 
 impl PolicyEngine {
     /// An engine with only the built-in policies compiled.
     pub fn new() -> Result<Self> {
-        let mut runtime = Runtime::new();
-        runtime.set_valid_ext_list(LIST_SUBSCRIBERS);
-        runtime.set_valid_ext_list(LIST_POSTERS);
-        runtime.set_valid_ext_list(LIST_MODERATORS);
-
-        let compiler = Compiler::new();
+        let engine = SieveEngine::new(&[LIST_SUBSCRIBERS, LIST_POSTERS, LIST_MODERATORS]);
         let mut policies = HashMap::new();
         for (name, script) in BUILTIN_SCRIPTS {
-            let compiled = compiler
+            let compiled = engine
                 .compile(script.as_bytes())
                 .map_err(|e| Error::Config(format!("compiling built-in policy `{name}`: {e}")))?;
-            policies.insert((*name).to_string(), Arc::new(compiled));
+            policies.insert((*name).to_string(), compiled);
         }
-        Ok(PolicyEngine { runtime, policies })
+        Ok(PolicyEngine { engine, policies })
     }
 
     /// The built-in policies plus every custom `*.sieve` file in `dir` (the file stem is the
     /// policy name). Custom policies may not reuse a built-in name.
     pub fn load(dir: &Path) -> Result<Self> {
-        let mut engine = Self::new()?;
-        let compiler = Compiler::new();
+        let mut this = Self::new()?;
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {
                 let path = entry?.path();
@@ -161,13 +160,13 @@ impl PolicyEngine {
                     )));
                 }
                 let text = std::fs::read(&path)?;
-                let script = compiler.compile(&text).map_err(|e| {
+                let script = this.engine.compile(&text).map_err(|e| {
                     Error::Config(format!("compiling policy {}: {e}", path.display()))
                 })?;
-                engine.policies.insert(name, Arc::new(script));
+                this.policies.insert(name, script);
             }
         }
-        Ok(engine)
+        Ok(this)
     }
 
     /// Whether a policy with this name exists (built-in or custom).
@@ -199,55 +198,28 @@ impl PolicyEngine {
             .policies
             .get(name)
             .ok_or_else(|| Error::Config(format!("unknown policy `{name}`")))?;
-
-        let mut instance = self.runtime.filter(raw);
-        if !mail_from.is_empty() {
-            instance.set_envelope(Envelope::From, mail_from.to_string());
-        }
-        instance.set_env_variable("vnd.carriers.list", list_name.to_string());
-
-        let mut decision: Option<PolicyDecision> = None;
-        let mut input = Input::script(Script::Personal(name.to_string()), script.clone());
-        while let Some(event) = instance.run(input) {
-            let event =
-                event.map_err(|e| Error::Auth(format!("policy `{name}` runtime error: {e:?}")))?;
-            input = match event {
-                Event::ListContains { lists, values, .. } => lists
-                    .iter()
-                    .any(|list| values.iter().any(|value| sets.contains(list, value)))
-                    .into(),
-                Event::MailboxExists { .. } | Event::DuplicateId { .. } => false.into(),
-                Event::IncludeScript { optional, .. } => {
-                    if optional {
-                        Input::False
-                    } else {
-                        return Err(Error::Config(format!(
-                            "policy `{name}` uses unsupported script includes"
-                        )));
-                    }
-                }
-                Event::Reject { .. } | Event::Discard => {
-                    decision.get_or_insert(PolicyDecision::Reject);
-                    true.into()
-                }
-                Event::FileInto { folder, .. } => {
-                    decision.get_or_insert(classify_folder(&folder));
-                    true.into()
-                }
-                // Keep and any other action: leave the (default) decision as-is.
-                _ => true.into(),
-            };
-        }
-        // No decisive action (implicit keep) means approve.
-        Ok(decision.unwrap_or(PolicyDecision::Approve))
+        let outcome = self.engine.run(
+            name,
+            script,
+            raw,
+            mail_from,
+            &[("vnd.carriers.list", list_name)],
+            sets,
+        )?;
+        Ok(match outcome {
+            SieveOutcome::Keep => PolicyDecision::Approve,
+            SieveOutcome::Discard => PolicyDecision::Discard,
+            SieveOutcome::Reject { reason } => PolicyDecision::Reject { reason },
+            SieveOutcome::FileInto { folder } => classify_folder(&folder),
+        })
     }
 }
 
+/// Any `fileinto` destination named like a moderation folder holds the message; anything else
+/// is treated as ordinary delivery (approve) — a real MDA would just file it into that mailbox.
 fn classify_folder(folder: &str) -> PolicyDecision {
     match folder.to_ascii_lowercase().as_str() {
         "moderate" | "moderation" | "hold" => PolicyDecision::Moderate,
-        "reject" | "discard" => PolicyDecision::Reject,
-        // Any other destination is treated as a normal delivery: approve.
         _ => PolicyDecision::Approve,
     }
 }
