@@ -25,8 +25,8 @@ It adds the standard `List-*` headers (RFC 2369), including one-click unsubscrib
 (RFC 8058) — all header-only changes that are DKIM-safe.
 
 Built on the battle-tested [Stalwart Labs](https://github.com/orgs/stalwartlabs/repositories)
-crates: `mail-auth` (DKIM/SPF/DMARC/ARC), `mail-parser`, `mail-builder`, `mail-send`, and
-`smtp-proto`.
+crates: `mail-auth` (DKIM/SPF/DMARC/ARC), `mail-parser`, `mail-builder`, `mail-send`,
+`smtp-proto`, and `sieve`.
 
 ## Architecture
 
