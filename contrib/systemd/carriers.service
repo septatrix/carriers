@@ -7,13 +7,11 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/bin/carriers --config /etc/carriers/carriers.toml run
-Restart=on-failure
-RestartSec=2
+ExecStart=carriers --config /etc/carriers/carriers.toml run
 
-# Run unprivileged, with a UID/GID allocated dynamically for the lifetime of the service —
-# no need to create a `carriers` user/group beforehand.
 DynamicUser=yes
+User=carriers
+Group=carriers
 
 # Managed state directory, accessible at /var/lib/carriers (0700, owned by the dynamic
 # user). Set db_path = "/var/lib/carriers/carriers.db" in carriers.toml.
@@ -21,12 +19,10 @@ StateDirectory=carriers
 
 # Sandboxing. Config and keys under /etc/carriers stay readable; only the state
 # directory is writable.
-NoNewPrivileges=true
-ProtectSystem=strict
 ProtectHome=true
-PrivateTmp=true
 PrivateDevices=true
 ProtectClock=true
+ProtectHostname=yes
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
@@ -35,10 +31,14 @@ ProtectProc=invisible
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true
-RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged
+# TODO remove this and check if any blocked calls are invoked
+# which would lead to a SIGSYS. If so, add them to the whitelist above.
 SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+CapabilityBoundingSet=
 UMask=0077
 
 [Install]
