@@ -11,13 +11,12 @@ ExecStart=/usr/bin/carriers --config /etc/carriers/carriers.toml run
 Restart=on-failure
 RestartSec=2
 
-# Run unprivileged. Create the `carriers` user/group beforehand, e.g.
-#   systemd-sysusers or: useradd --system --no-create-home --shell /usr/sbin/nologin carriers
-User=carriers
-Group=carriers
+# Run unprivileged, with a UID/GID allocated dynamically for the lifetime of the service —
+# no need to create a `carriers` user/group beforehand.
+DynamicUser=yes
 
-# Managed state directory at /var/lib/carriers (0700 carriers:carriers). Set
-# db_path = "/var/lib/carriers/carriers.db" in carriers.toml.
+# Managed state directory, accessible at /var/lib/carriers (0700, owned by the dynamic
+# user). Set db_path = "/var/lib/carriers/carriers.db" in carriers.toml.
 StateDirectory=carriers
 
 # Sandboxing. Config and keys under /etc/carriers stay readable; only the state

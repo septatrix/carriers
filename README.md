@@ -89,10 +89,12 @@ service is ready. Under socket activation the `listen` value in `carriers.toml` 
 install -Dm755 target/release/carriers /usr/bin/carriers
 install -Dm644 contrib/systemd/carriers.socket  /etc/systemd/system/carriers.socket
 install -Dm644 contrib/systemd/carriers.service /etc/systemd/system/carriers.service
-useradd --system --no-create-home --shell /usr/sbin/nologin carriers
 systemctl daemon-reload
 systemctl enable --now carriers.socket carriers.service
 ```
+
+The service runs as a dynamically allocated user (`DynamicUser=yes`), so there is no `carriers`
+user/group to create beforehand.
 
 The service is sandboxed (`ProtectSystem=strict`, a managed `StateDirectory=carriers`, a
 system-call filter, etc.); keep `db_path = "/var/lib/carriers/carriers.db"` so the database
