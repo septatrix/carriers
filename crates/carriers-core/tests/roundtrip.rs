@@ -158,10 +158,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 #[test]
 fn augment_preserves_body_and_adds_list_headers() {
-    let dir = tempdir();
-    let (dkim_file, _) = make_key(&dir, "dkim.der");
-    let (arc_file, _) = make_key(&dir, "arc.der");
-    let list = build_list(&dir, &dkim_file, &arc_file);
+    let dir = tempfile::tempdir().unwrap();
+    let (dkim_file, _) = make_key(dir.path(), "dkim.der");
+    let (arc_file, _) = make_key(dir.path(), "arc.der");
+    let list = build_list(dir.path(), &dkim_file, &arc_file);
 
     let augmented = transform::augment(&list, FIXTURE);
 
@@ -186,8 +186,8 @@ async fn rsa_der_key_signs_and_verifies() {
     // RSA keys are read as raw PKCS#1 DER (constructed by hand into a `PrivateKeyDer::Pkcs1`),
     // unlike Ed25519's PKCS#8 — exercise that path specifically rather than relying only on
     // the Ed25519 coverage used elsewhere in this file.
-    let dir = tempdir();
-    let (key_file, dns_txt) = make_key_with(&dir, "rsa.der", Algorithm::Rsa);
+    let dir = tempfile::tempdir().unwrap();
+    let (key_file, dns_txt) = make_key_with(dir.path(), "rsa.der", Algorithm::Rsa);
 
     let key = load_dkim_key(&KeyConfig {
         selector: "rsatest".into(),
@@ -220,11 +220,11 @@ async fn rsa_der_key_signs_and_verifies() {
 
 #[tokio::test]
 async fn author_dkim_survives_and_list_dkim_is_valid() {
-    let dir = tempdir();
-    let (author_file, author_txt) = make_key(&dir, "author.der");
-    let (dkim_file, dkim_txt) = make_key(&dir, "dkim.der");
-    let (arc_file, _arc_txt) = make_key(&dir, "arc.der");
-    let list = build_list(&dir, &dkim_file, &arc_file);
+    let dir = tempfile::tempdir().unwrap();
+    let (author_file, author_txt) = make_key(dir.path(), "author.der");
+    let (dkim_file, dkim_txt) = make_key(dir.path(), "dkim.der");
+    let (arc_file, _arc_txt) = make_key(dir.path(), "arc.der");
+    let list = build_list(dir.path(), &dkim_file, &arc_file);
 
     // Inbound message with the author's signature, then our List-* headers, then our signature.
     let authored = authored_message(&author_file);
@@ -255,10 +255,10 @@ async fn author_dkim_survives_and_list_dkim_is_valid() {
 
 #[tokio::test]
 async fn arc_seal_produces_a_valid_chain() {
-    let dir = tempdir();
-    let (dkim_file, _) = make_key(&dir, "dkim.der");
-    let (arc_file, arc_txt) = make_key(&dir, "arc.der");
-    let list = build_list(&dir, &dkim_file, &arc_file);
+    let dir = tempfile::tempdir().unwrap();
+    let (dkim_file, _) = make_key(dir.path(), "dkim.der");
+    let (arc_file, arc_txt) = make_key(dir.path(), "arc.der");
+    let list = build_list(dir.path(), &dkim_file, &arc_file);
     let authenticator = MessageAuthenticator::new_cloudflare().unwrap();
 
     let augmented = transform::augment(&list, FIXTURE);
@@ -285,20 +285,4 @@ async fn arc_seal_produces_a_valid_chain() {
         &DkimResult::Pass,
         "the freshly sealed ARC chain must verify as cv=pass"
     );
-}
-
-/// Minimal unique temp directory helper (avoids a dev-dependency on `tempfile`).
-fn tempdir() -> std::path::PathBuf {
-    let mut path = std::env::temp_dir();
-    let unique = format!(
-        "carriers-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    path.push(unique);
-    std::fs::create_dir_all(&path).unwrap();
-    path
 }

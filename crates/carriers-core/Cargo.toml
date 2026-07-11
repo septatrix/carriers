@@ -25,3 +25,4 @@ rustls-pki-types = "1.15"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt", "macros"] }
+tempfile = "3.13.0"

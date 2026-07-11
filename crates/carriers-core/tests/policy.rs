@@ -23,20 +23,6 @@ fn write_policy(dir: &std::path::Path, name: &str, body: &str) {
     std::fs::write(dir.join(format!("{name}.sieve")), body).unwrap();
 }
 
-fn tempdir() -> std::path::PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "carriers-policy-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    path
-}
-
 fn message(from: &str) -> Vec<u8> {
     format!("From: {from}\r\nTo: dev@lists.example.org\r\nSubject: hi\r\n\r\nbody\r\n").into_bytes()
 }
@@ -53,9 +39,9 @@ fn sets() -> MembershipSets {
 
 #[test]
 fn sieve_policy_decides_approve_moderate_discard_reject() {
-    let dir = tempdir();
-    write_policy(&dir, "corporate", POLICY);
-    let engine = PolicyEngine::load(&dir).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let engine = PolicyEngine::load(dir.path()).unwrap();
     assert!(engine.contains("corporate"));
 
     let sets = sets();
@@ -80,9 +66,9 @@ fn sieve_policy_decides_approve_moderate_discard_reject() {
 
 #[test]
 fn empty_script_approves_by_default() {
-    let dir = tempdir();
-    write_policy(&dir, "allow", "# allow everything (implicit keep)\n");
-    let engine = PolicyEngine::load(&dir).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "allow", "# allow everything (implicit keep)\n");
+    let engine = PolicyEngine::load(dir.path()).unwrap();
     assert_eq!(
         engine
             .evaluate(
@@ -99,9 +85,9 @@ fn empty_script_approves_by_default() {
 
 #[test]
 fn compile_error_is_reported() {
-    let dir = tempdir();
-    write_policy(&dir, "broken", "if address :list \"from\" {\n"); // malformed
-    assert!(PolicyEngine::load(&dir).is_err());
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "broken", "if address :list \"from\" {\n"); // malformed
+    assert!(PolicyEngine::load(dir.path()).is_err());
 }
 
 #[test]
@@ -151,7 +137,7 @@ fn builtin_policies_behave_like_the_posting_modes() {
 
 #[test]
 fn custom_policy_may_not_reuse_a_builtin_name() {
-    let dir = tempdir();
-    write_policy(&dir, "subscribers", "# tries to shadow a built-in\n");
-    assert!(PolicyEngine::load(&dir).is_err());
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "subscribers", "# tries to shadow a built-in\n");
+    assert!(PolicyEngine::load(dir.path()).is_err());
 }
