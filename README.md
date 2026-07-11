@@ -43,7 +43,6 @@ crates: `mail-auth` (DKIM/SPF/DMARC/ARC), `mail-parser`, `mail-builder`, `mail-s
 | Membership storage | flat-file seed + SQLite | relational DB (Django ORM) | flat text files (mbox-style directories) | relational DB |
 | Bounce handling | VERP, automatic scoring and delivery disabling | VERP, bounce processing | VERP, automated bounce handling (`mlmmj-bounce`) | VERP, bounce processing |
 | Archiving | not yet — planned (see [Status / roadmap](#status--roadmap)) | yes (HyperKitty) | no (left to external tools) | yes |
-| Digest mode | not yet — planned | yes | yes | yes |
 
 Mailman 3 and Sympa are mature, full-featured suites with web UIs, archiving and far more
 configurability than carriers currently offers; both also added ARC support to cope with DMARC,
@@ -239,7 +238,6 @@ Deferred / ideas:
 - STARTTLS / implicit TLS on the listener
 - direct-to-MX delivery (its own retry queue) instead of a smarthost
 - a REST / pull-based member API
-- digest mode
 - message archiving: store each distributed post as an `.eml` file on disk under a per-list
   subdirectory, with a search index (full-text over headers/body) for retrieval; a web archive
   could be layered on top
