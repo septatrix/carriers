@@ -22,7 +22,7 @@ host = "127.0.0.1"
 fn global_before_and_after_default_to_sibling_files() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = write(dir.path(), "carriers.toml", MINIMAL);
-    let before_path = write(dir.path(), "global.sieve", "discard;\n");
+    let before_path = write(dir.path(), "global-before.sieve", "discard;\n");
     let after_path = write(dir.path(), "global-after.sieve", "discard;\n");
 
     let config = Config::load(&config_path).unwrap();
@@ -44,7 +44,7 @@ fn global_before_and_after_are_unset_without_a_sibling_or_explicit_path() {
 #[test]
 fn explicit_global_policy_overrides_the_sibling_defaults() {
     let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "global.sieve", "discard;\n");
+    write(dir.path(), "global-before.sieve", "discard;\n");
     write(dir.path(), "global-after.sieve", "discard;\n");
     let before = write(dir.path(), "elsewhere-before.sieve", "discard;\n");
     let after = write(dir.path(), "elsewhere-after.sieve", "discard;\n");

@@ -28,8 +28,8 @@ policies_dir = "/etc/carriers/policies"
 # shared spam/abuse blocklist — while still having access to the current list's membership
 # (subscribers/posters/moderators). All of this is optional.
 [global_policy]
-# Runs ahead of every list's own policy. If left unset, a `global.sieve` file next to this
-# config file is used automatically if one exists.
+# Runs ahead of every list's own policy. If left unset, a `global-before.sieve` file next to
+# this config file is used automatically if one exists.
 # before = "/etc/carriers/global-before.sieve"
 # Runs after every list's own policy. If left unset, a `global-after.sieve` file next to this
 # config file is used automatically if one exists.

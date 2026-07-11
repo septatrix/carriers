@@ -52,8 +52,8 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct GlobalPolicyConfig {
     /// Runs ahead of every list's own policy, regardless of the list's domain. Optional: if
-    /// unset, [`Config::load`] falls back to a `global.sieve` file next to this config file, if
-    /// one exists.
+    /// unset, [`Config::load`] falls back to a `global-before.sieve` file next to this config
+    /// file, if one exists.
     #[serde(default)]
     pub before: Option<PathBuf>,
 
@@ -156,7 +156,7 @@ impl Config {
         let text = std::fs::read_to_string(path)?;
         let mut config: Config = toml::from_str(&text)?;
         if config.global_policy.before.is_none() {
-            let sibling = path.with_file_name("global.sieve");
+            let sibling = path.with_file_name("global-before.sieve");
             if sibling.is_file() {
                 config.global_policy.before = Some(sibling);
             }
