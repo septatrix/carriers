@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Hostname of this host. Used as the EHLO/LHLO name, in `Authentication-Results`,
     /// and as the `helo` identity when checking inbound SPF.
@@ -45,6 +46,7 @@ pub struct Config {
 /// `threshold`, delivery to that address is disabled until an operator re-enables it with
 /// `carriers member enable`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BounceConfig {
     #[serde(default = "default_threshold")]
     pub threshold: f64,
@@ -87,6 +89,7 @@ pub enum Protocol {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Smarthost {
     pub host: String,
     #[serde(default = "default_smarthost_port")]

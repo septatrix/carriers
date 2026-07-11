@@ -6,11 +6,12 @@
 //! network can slot in here — the trait is already async — using the same SQLite store as its
 //! offline cache.
 //!
-//! Two distinct roles are exposed: a *subscriber* receives the list, while a *member* is merely
-//! recorded in the database and may be permitted to post without receiving (a superset of
-//! subscribers). The posting policy decides which role is required to post directly.
+//! Three roles are exposed, each an independent flag rather than a hierarchy: a *subscriber*
+//! receives the list; a *poster* may post directly under the `posters` policy (see
+//! [`crate::policy`]); a *moderator* is exposed to Sieve policies as the `moderators` list.
+//! None of these implies another — subscribing does not grant posting rights, and being a
+//! poster does not imply receiving the list.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,17 +21,25 @@ use crate::store::{Member, Store};
 
 #[async_trait]
 pub trait MemberProvider: Send + Sync {
-    /// True if the address is recorded for the list at all (subscriber or posting-only member).
+    /// True if the address is recorded for the list at all, under any role.
     async fn is_member(&self, list: &str, address: &str) -> Result<bool>;
     /// True if the address is a subscriber (receives the list).
     async fn is_subscriber(&self, list: &str, address: &str) -> Result<bool>;
+    /// True if the address is a poster (may post directly), independent of subscription.
+    async fn is_poster(&self, list: &str, address: &str) -> Result<bool>;
     /// Subscriber addresses to deliver to.
     async fn recipients(&self, list: &str) -> Result<Vec<String>>;
-    /// Add a member; `subscribed` marks whether they receive the list, `moderator` the role.
-    async fn add(&self, list: &str, address: &str, subscribed: bool, moderator: bool)
-        -> Result<()>;
+    /// Add a member with the given independent roles (see the module docs).
+    async fn add(
+        &self,
+        list: &str,
+        address: &str,
+        subscribed: bool,
+        poster: bool,
+        moderator: bool,
+    ) -> Result<()>;
     async fn remove(&self, list: &str, address: &str) -> Result<()>;
-    /// All members with their subscription state.
+    /// All members with their roles.
     async fn members(&self, list: &str) -> Result<Vec<Member>>;
 }
 
@@ -42,22 +51,6 @@ impl SqliteMemberProvider {
     pub fn new(store: Arc<Store>) -> Self {
         SqliteMemberProvider { store }
     }
-
-    /// Import subscriber addresses from a flat file (one per line, `#` comments and blanks
-    /// ignored). Returns the number of addresses imported.
-    pub async fn seed_from_file(&self, list: &str, path: &Path) -> Result<usize> {
-        let text = std::fs::read_to_string(path)?;
-        let mut n = 0;
-        for line in text.lines() {
-            let addr = line.trim();
-            if addr.is_empty() || addr.starts_with('#') {
-                continue;
-            }
-            self.store.add_member(list, addr, true, false).await?;
-            n += 1;
-        }
-        Ok(n)
-    }
 }
 
 #[async_trait]
@@ -68,6 +61,9 @@ impl MemberProvider for SqliteMemberProvider {
     async fn is_subscriber(&self, list: &str, address: &str) -> Result<bool> {
         self.store.is_subscriber(list, address).await
     }
+    async fn is_poster(&self, list: &str, address: &str) -> Result<bool> {
+        self.store.is_poster(list, address).await
+    }
     async fn recipients(&self, list: &str) -> Result<Vec<String>> {
         self.store.subscribers(list).await
     }
@@ -76,10 +72,11 @@ impl MemberProvider for SqliteMemberProvider {
         list: &str,
         address: &str,
         subscribed: bool,
+        poster: bool,
         moderator: bool,
     ) -> Result<()> {
         self.store
-            .add_member(list, address, subscribed, moderator)
+            .add_member(list, address, subscribed, poster, moderator)
             .await
     }
     async fn remove(&self, list: &str, address: &str) -> Result<()> {

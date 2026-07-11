@@ -129,13 +129,13 @@ script" configuration shape.
 | --- | --- | --- |
 | `open` | anyone | — |
 | `subscribers` (default) | subscribers (receive the list) | held for moderation |
-| `members` | any address in the member database (a superset of subscribers — a member may post without being subscribed) | held for moderation |
+| `posters` | addresses flagged as posters, independent of subscription (subscribing does not grant posting rights, and being a poster does not imply receiving the list) | held for moderation |
 | `moderated` | nobody | held for moderation |
 
 Held posts wait in a per-list queue. Review them with `carriers moderate list`, inspect one with
 `carriers moderate show <id>`, then `carriers moderate approve <id>` (distributes it) or
-`carriers moderate reject <id>` (discards it). A "member" who is not a subscriber is added with
-`carriers member add <list> <address> --posting-only`.
+`carriers moderate reject <id>` (discards it). A poster who is not a subscriber is added with
+`carriers member add <list> <address> --poster --no-subscribe`.
 
 ### Sieve policies
 
@@ -149,14 +149,15 @@ Sieve actions:
 - `discard;` / `reject "…";` — **reject** (drop)
 
 Membership is exposed as Sieve external lists, resolved against the *current* list, so one
-global script adapts per mailing list: `subscribers`, `members` (a superset), and `moderators`
-(set with `carriers member add … --moderator`). The list's short name is available as the
+global script adapts per mailing list. These are independent flags, not a hierarchy —
+`subscribers`, `posters`, and `moderators` (set with `carriers member add … --moderator`) may
+overlap arbitrarily or not at all. The list's short name is available as the
 `vnd.carriers.list` environment variable. `carriers policies` lists the compiled policies.
 
 ```sieve
 require ["envelope", "extlists", "fileinto"];
 if address :list "from" "subscribers" { keep; }
-elsif address :list "from" "members"  { fileinto "moderate"; }
+elsif address :list "from" "posters"  { fileinto "moderate"; }
 else                                  { discard; }
 ```
 
@@ -181,7 +182,7 @@ address is disabled — it is skipped as a recipient — until an operator runs
 | --- | --- |
 | `carriers run` | Run the ingress listener and distribute posts. |
 | `carriers genkey` | Generate a DKIM/ARC key pair and print the DNS record. |
-| `carriers member add\|remove\|list\|enable <list> [address] [--posting-only] [--moderator]` | Manage members; `enable` clears bounce state. |
+| `carriers member add\|remove\|list\|enable <list> [address] [--poster] [--no-subscribe] [--moderator]` | Manage members; `enable` clears bounce state. |
 | `carriers moderate list\|show\|approve\|reject [id]` | Review and act on held messages. |
 | `carriers policies` | List the compiled Sieve moderation policies. |
 | `carriers sync` | Import each list's flat `members_file` into SQLite. |
@@ -189,10 +190,10 @@ address is disabled — it is skipped as a recipient — until an operator runs
 ## Status / roadmap
 
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
-open / subscribers / members / moderated modes, or a Sieve script), VERP bounce processing with
+open / subscribers / posters / moderated modes, or a Sieve script), VERP bounce processing with
 automatic delivery disabling, loop and duplicate suppression, `List-*` headers, aligned DKIM
-signing, ARC sealing, smarthost delivery, flat-file lists + SQLite membership (subscribers,
-posting-only members, and moderators), key generation.
+signing, ARC sealing, smarthost delivery, flat-file lists + SQLite membership (independent
+subscriber, poster and moderator roles), key generation.
 
 Deferred / ideas:
 

@@ -5,7 +5,7 @@
 //! its single `policy = "<name>"` config field. Policies are global and static — compiled once
 //! at startup.
 //!
-//! The four built-in policies (`open`, `subscribers`, `members`, `moderated`) are themselves
+//! The four built-in policies (`open`, `subscribers`, `posters`, `moderated`) are themselves
 //! compiled Sieve scripts (see [`BUILTIN_SCRIPTS`]), so every list — whether it names a
 //! built-in policy or a custom script — is moderated through this one engine, looked up by the
 //! same name.
@@ -17,16 +17,17 @@
 //! - `discard;` or `reject "…";` — **reject** (drop) the post.
 //!
 //! Membership is exposed as Sieve external lists, resolved against the *current* list, so a
-//! single global script adapts per mailing list:
+//! single global script adapts per mailing list. These are independent flags, not a hierarchy —
+//! a subscriber is not automatically a poster, and a poster is not automatically a subscriber:
 //!
 //! - `subscribers` — addresses that receive the list.
-//! - `members` — every address in the member database (a superset of subscribers).
+//! - `posters` — addresses that may post directly, independent of subscription.
 //! - `moderators` — addresses flagged as moderators.
 //!
 //! ```sieve
 //! require ["envelope", "extlists", "fileinto"];
 //! if address :list "from" "subscribers" { keep; }
-//! elsif address :list "from" "members" { fileinto "moderate"; }
+//! elsif address :list "from" "posters" { fileinto "moderate"; }
 //! else { discard; }
 //! ```
 
@@ -40,7 +41,7 @@ use crate::error::{Error, Result};
 
 /// External list names exposed to policy scripts via the Sieve `:list` match.
 pub const LIST_SUBSCRIBERS: &str = "subscribers";
-pub const LIST_MEMBERS: &str = "members";
+pub const LIST_POSTERS: &str = "posters";
 pub const LIST_MODERATORS: &str = "moderators";
 
 /// Names of the built-in policies. These are reserved: an administrator's `<name>.sieve` file
@@ -48,7 +49,7 @@ pub const LIST_MODERATORS: &str = "moderators";
 /// custom policies share one evaluation path.
 pub const BUILTIN_OPEN: &str = "open";
 pub const BUILTIN_SUBSCRIBERS: &str = "subscribers";
-pub const BUILTIN_MEMBERS: &str = "members";
+pub const BUILTIN_POSTERS: &str = "posters";
 pub const BUILTIN_MODERATED: &str = "moderated";
 
 /// The built-in policies, expressed as Sieve scripts, as `(name, script)` pairs.
@@ -61,11 +62,11 @@ const BUILTIN_SCRIPTS: &[(&str, &str)] = &[
         "require [\"extlists\", \"fileinto\"];\n\
          if not address :list \"from\" \"subscribers\" { fileinto \"moderate\"; }\n",
     ),
-    // Any member of the database posts directly; anyone else is held for moderation.
+    // Posters post directly (independent of subscription); anyone else is held for moderation.
     (
-        BUILTIN_MEMBERS,
+        BUILTIN_POSTERS,
         "require [\"extlists\", \"fileinto\"];\n\
-         if not address :list \"from\" \"members\" { fileinto \"moderate\"; }\n",
+         if not address :list \"from\" \"posters\" { fileinto \"moderate\"; }\n",
     ),
     // Every post is held for moderation.
     (
@@ -91,11 +92,12 @@ pub enum PolicyDecision {
 }
 
 /// Membership facts for the current list, resolved before evaluating a (synchronous) script.
-/// Addresses are stored lowercased.
+/// Addresses are stored lowercased. These are independent sets, not a hierarchy: an address in
+/// `subscribers` need not be in `posters`, and vice versa.
 #[derive(Default)]
 pub struct MembershipSets {
     pub subscribers: HashSet<String>,
-    pub members: HashSet<String>,
+    pub posters: HashSet<String>,
     pub moderators: HashSet<String>,
 }
 
@@ -104,7 +106,7 @@ impl MembershipSets {
         let value = value.to_ascii_lowercase();
         match list {
             LIST_SUBSCRIBERS => self.subscribers.contains(&value),
-            LIST_MEMBERS => self.members.contains(&value),
+            LIST_POSTERS => self.posters.contains(&value),
             LIST_MODERATORS => self.moderators.contains(&value),
             _ => false,
         }
@@ -122,7 +124,7 @@ impl PolicyEngine {
     pub fn new() -> Result<Self> {
         let mut runtime = Runtime::new();
         runtime.set_valid_ext_list(LIST_SUBSCRIBERS);
-        runtime.set_valid_ext_list(LIST_MEMBERS);
+        runtime.set_valid_ext_list(LIST_POSTERS);
         runtime.set_valid_ext_list(LIST_MODERATORS);
 
         let compiler = Compiler::new();

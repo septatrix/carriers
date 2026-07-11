@@ -14,6 +14,26 @@ subscribe_url = "https://lists.example.org/subscribe/dev"
 # carriers emits both `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`.
 unsubscribe_oneclick = "https://lists.example.org/u/dev?token=..."
 
+# The moderation policy: a built-in name, or the name of a custom `<name>.sieve` file in
+# policies_dir (see examples/policies/). Held posts wait in a queue; review them with
+# `carriers moderate`.
+#
+# NOTE: this must come before the [dkim]/[arc] tables below — a bare `key = value` line placed
+# after a [table] header belongs to that table, not to the list's top-level config.
+#
+# Built-in policies:
+#   "open"        - anyone may post; nothing is moderated
+#   "subscribers" - subscribers post directly; other senders are held for moderation (default)
+#   "posters"     - addresses flagged as posters post directly, independent of subscription
+#                   (subscribing does not grant posting rights, and vice versa); others are held
+#   "moderated"   - every post is held for moderation
+policy = "subscribers"
+# policy = "moderated-posters"  # a custom Sieve policy instead
+
+# Optional flat member seed file (one address per line, `#` comments). Import with
+# `carriers sync`.
+# members_file = "/var/lib/carriers/lists/dev/members"
+
 # DKIM signing key for the list domain. Generate with:
 #   carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.der
 [dkim]
@@ -27,20 +47,3 @@ algorithm = "ed25519" # or "rsa"
 selector = "arc"
 key_file = "/etc/carriers/keys/dev.arc.der"
 algorithm = "ed25519"
-
-# The moderation policy: a built-in name, or the name of a custom `<name>.sieve` file in
-# policies_dir (see examples/policies/). Held posts wait in a queue; review them with
-# `carriers moderate`.
-#
-# Built-in policies:
-#   "open"        - anyone may post; nothing is moderated
-#   "subscribers" - subscribers post directly; other senders are held for moderation (default)
-#   "members"     - any address in the member database posts directly (a superset of
-#                   subscribers, since a member need not be subscribed); others are held
-#   "moderated"   - every post is held for moderation
-policy = "subscribers"
-# policy = "moderated-members"  # a custom Sieve policy instead
-
-# Optional flat member seed file (one address per line, `#` comments). Import with
-# `carriers sync`.
-# members_file = "/var/lib/carriers/lists/dev/members"

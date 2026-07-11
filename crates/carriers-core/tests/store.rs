@@ -6,21 +6,22 @@ use carriers_core::member::{MemberProvider, SqliteMemberProvider};
 use carriers_core::store::Store;
 
 #[tokio::test]
-async fn subscribers_and_posting_only_members() {
+async fn subscriber_and_poster_roles_are_independent() {
     let store = Arc::new(Store::open_in_memory().await.unwrap());
     let provider = SqliteMemberProvider::new(store);
 
-    // A subscriber (receives + is a member) and a posting-only member (member, not subscriber).
+    // alice: subscriber only, not a poster. bot: poster only, not a subscriber. The two roles
+    // are disjoint here, not a superset of one another.
     provider
-        .add("dev", "Alice@Example.com", true, false)
+        .add("dev", "Alice@Example.com", true, false, false)
         .await
         .unwrap();
     provider
-        .add("dev", "bot@example.net", false, false)
+        .add("dev", "bot@example.net", false, true, false)
         .await
         .unwrap();
 
-    // Both are members; only alice is a subscriber / recipient.
+    // Both are recorded members; roles are independent.
     assert!(provider
         .is_member("dev", "alice@example.com")
         .await
@@ -31,23 +32,31 @@ async fn subscribers_and_posting_only_members() {
         .await
         .unwrap());
     assert!(!provider
+        .is_poster("dev", "alice@example.com")
+        .await
+        .unwrap());
+    assert!(!provider
         .is_subscriber("dev", "bot@example.net")
         .await
         .unwrap());
+    assert!(provider.is_poster("dev", "bot@example.net").await.unwrap());
     assert_eq!(
         provider.recipients("dev").await.unwrap(),
-        vec!["alice@example.com".to_string()]
+        vec!["alice@example.com".to_string()],
+        "only the subscriber is a delivery recipient, regardless of poster status"
     );
 
-    // Re-adding with a different role updates it (idempotent upsert).
+    // Re-adding with different roles updates them (idempotent upsert): bot becomes both a
+    // subscriber and a poster.
     provider
-        .add("dev", "bot@example.net", true, false)
+        .add("dev", "bot@example.net", true, true, false)
         .await
         .unwrap();
     assert!(provider
         .is_subscriber("dev", "bot@example.net")
         .await
         .unwrap());
+    assert!(provider.is_poster("dev", "bot@example.net").await.unwrap());
 
     provider.remove("dev", "alice@example.com").await.unwrap();
     assert!(!provider
@@ -76,7 +85,7 @@ async fn record_message_deduplicates() {
 async fn bounces_disable_delivery_then_enable_restores_it() {
     let store = Store::open_in_memory().await.unwrap();
     store
-        .add_member("dev", "alice@example.com", true, false)
+        .add_member("dev", "alice@example.com", true, false, false)
         .await
         .unwrap();
 

@@ -97,13 +97,19 @@ impl From<KeyAlg> for Algorithm {
 
 #[derive(Subcommand)]
 enum MemberCommand {
-    /// Add a member to a list (a subscriber by default).
+    /// Add a member to a list (a subscriber by default). Roles are independent: a poster is
+    /// not automatically subscribed, and a subscriber is not automatically a poster.
     Add {
         list: String,
         address: String,
-        /// Add as a posting-only member (may post but does not receive the list).
+        /// Do not subscribe this address (it will not receive the list). Combine with
+        /// --poster for a posting-only address.
         #[arg(long)]
-        posting_only: bool,
+        no_subscribe: bool,
+        /// Grant posting rights independent of subscription (exposed to Sieve policies as the
+        /// `posters` list, and used by the `posters` built-in policy).
+        #[arg(long)]
+        poster: bool,
         /// Grant the moderator role (exposed to Sieve policies as the `moderators` list).
         #[arg(long)]
         moderator: bool,
@@ -198,7 +204,7 @@ async fn sync(config_path: &Path) -> Result<()> {
     let lists = load_lists(&config)?;
     for list in lists.values() {
         if let Some(members_file) = &list.cfg.members_file {
-            let n = provider.seed_from_file(&list.name, members_file).await?;
+            let n = seed_subscribers_from_file(&provider, &list.name, members_file).await?;
             println!(
                 "{}: imported {n} members from {}",
                 list.name,
@@ -209,6 +215,27 @@ async fn sync(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Import subscriber addresses from a flat file (one per line, `#` comments and blanks
+/// ignored). Returns the number of addresses imported.
+async fn seed_subscribers_from_file(
+    provider: &SqliteMemberProvider,
+    list: &str,
+    path: &Path,
+) -> Result<usize> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading members file {}", path.display()))?;
+    let mut n = 0;
+    for line in text.lines() {
+        let addr = line.trim();
+        if addr.is_empty() || addr.starts_with('#') {
+            continue;
+        }
+        provider.add(list, addr, true, false, false).await?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
     let config = Config::load(config_path)?;
     let store = open_store(&config).await?;
@@ -217,16 +244,26 @@ async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
         MemberCommand::Add {
             list,
             address,
-            posting_only,
+            no_subscribe,
+            poster,
             moderator,
         } => {
             resolve_list_name(&config, &list)?;
             provider
-                .add(&list, &address, !posting_only, moderator)
+                .add(&list, &address, !no_subscribe, poster, moderator)
                 .await?;
-            let mut roles = vec![if posting_only { "poster" } else { "subscriber" }];
+            let mut roles = Vec::new();
+            if !no_subscribe {
+                roles.push("subscriber");
+            }
+            if poster {
+                roles.push("poster");
+            }
             if moderator {
                 roles.push("moderator");
+            }
+            if roles.is_empty() {
+                roles.push("no roles");
             }
             println!("added {address} to {list} ({})", roles.join(", "));
         }
@@ -236,13 +273,18 @@ async fn member(config_path: &Path, cmd: MemberCommand) -> Result<()> {
         }
         MemberCommand::List { list } => {
             for member in provider.members(&list).await? {
-                let mut roles = vec![if member.subscribed {
-                    "subscriber"
-                } else {
-                    "poster"
-                }];
+                let mut roles = Vec::new();
+                if member.subscribed {
+                    roles.push("subscriber");
+                }
+                if member.poster {
+                    roles.push("poster");
+                }
                 if member.moderator {
                     roles.push("moderator");
+                }
+                if roles.is_empty() {
+                    roles.push("no roles");
                 }
                 let role = roles.join(", ");
                 let status = if member.bounce_disabled {
@@ -334,7 +376,13 @@ fn policies(config_path: &Path) -> Result<()> {
         None => PolicyEngine::new().context("compiling built-in policies")?,
     };
 
-    println!("built-in: open, subscribers, members, moderated");
+    println!(
+        "built-in: {}, {}, {}, {}",
+        carriers_core::policy::BUILTIN_OPEN,
+        carriers_core::policy::BUILTIN_SUBSCRIBERS,
+        carriers_core::policy::BUILTIN_POSTERS,
+        carriers_core::policy::BUILTIN_MODERATED,
+    );
     let mut names: Vec<&str> = engine.names().collect();
     names.sort_unstable();
     if names.is_empty() {

@@ -6,10 +6,10 @@ use carriers_core::policy::{MembershipSets, PolicyDecision, PolicyEngine};
 
 const POLICY: &str = r#"
 require ["envelope", "extlists", "fileinto"];
-# Subscribers post freely; other members are moderated; strangers are rejected.
+# Subscribers post freely; posters are moderated; strangers are rejected.
 if address :list "from" "subscribers" {
     keep;
-} elsif address :list "from" "members" {
+} elsif address :list "from" "posters" {
     fileinto "moderate";
 } else {
     discard;
@@ -38,13 +38,12 @@ fn message(from: &str) -> Vec<u8> {
     format!("From: {from}\r\nTo: dev@lists.example.org\r\nSubject: hi\r\n\r\nbody\r\n").into_bytes()
 }
 
+/// alice is a subscriber only; bot is a poster only — the two sets are disjoint here, not a
+/// superset of one another, demonstrating that subscribing does not imply posting rights.
 fn sets() -> MembershipSets {
     MembershipSets {
         subscribers: HashSet::from(["alice@example.com".to_string()]),
-        members: HashSet::from([
-            "alice@example.com".to_string(),
-            "bot@example.net".to_string(),
-        ]),
+        posters: HashSet::from(["bot@example.net".to_string()]),
         moderators: HashSet::new(),
     }
 }
@@ -63,7 +62,7 @@ fn sieve_policy_decides_approve_moderate_reject() {
             .unwrap()
     };
 
-    // Subscriber -> approve; posting-only member -> moderate; stranger -> reject.
+    // Subscriber -> approve; poster (not a subscriber) -> moderate; stranger -> reject.
     assert_eq!(eval("alice@example.com"), PolicyDecision::Approve);
     assert_eq!(eval("bot@example.net"), PolicyDecision::Moderate);
     assert_eq!(eval("mallory@evil.example"), PolicyDecision::Reject);
@@ -98,7 +97,7 @@ fn compile_error_is_reported() {
 #[test]
 fn builtin_policies_behave_like_the_posting_modes() {
     let engine = PolicyEngine::new().unwrap();
-    let sets = sets(); // subscribers: alice; members: alice, bot
+    let sets = sets(); // subscribers: alice; posters: bot
     let eval = |policy: &str, from: &str| {
         engine
             .evaluate(policy, "dev", from, &message(from), &sets)
@@ -111,7 +110,7 @@ fn builtin_policies_behave_like_the_posting_modes() {
         PolicyDecision::Approve
     );
 
-    // subscribers: subscriber approved, everyone else held.
+    // subscribers: subscriber approved, everyone else (including a poster) held.
     assert_eq!(
         eval("subscribers", "alice@example.com"),
         PolicyDecision::Approve
@@ -121,10 +120,15 @@ fn builtin_policies_behave_like_the_posting_modes() {
         PolicyDecision::Moderate
     );
 
-    // members: any member approved, others held.
-    assert_eq!(eval("members", "bot@example.net"), PolicyDecision::Approve);
+    // posters: a poster is approved even without being a subscriber; a subscriber who is not
+    // also a poster is held (the two roles are independent).
+    assert_eq!(eval("posters", "bot@example.net"), PolicyDecision::Approve);
     assert_eq!(
-        eval("members", "mallory@evil.example"),
+        eval("posters", "alice@example.com"),
+        PolicyDecision::Moderate
+    );
+    assert_eq!(
+        eval("posters", "mallory@evil.example"),
         PolicyDecision::Moderate
     );
 

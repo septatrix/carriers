@@ -137,20 +137,25 @@ pub async fn intake(
 }
 
 /// Build the membership sets exposed to Sieve policies for `list_name`.
+///
+/// Each role is populated only from its own flag — subscribers and posters are independent
+/// sets, not a hierarchy, so an address is not implicitly a poster just for being a subscriber.
 async fn membership_sets(members: &dyn MemberProvider, list_name: &str) -> Result<MembershipSets> {
     let mut sets = MembershipSets {
         subscribers: HashSet::new(),
-        members: HashSet::new(),
+        posters: HashSet::new(),
         moderators: HashSet::new(),
     };
     for member in members.members(list_name).await? {
         if member.subscribed {
             sets.subscribers.insert(member.address.clone());
         }
-        if member.moderator {
-            sets.moderators.insert(member.address.clone());
+        if member.poster {
+            sets.posters.insert(member.address.clone());
         }
-        sets.members.insert(member.address);
+        if member.moderator {
+            sets.moderators.insert(member.address);
+        }
     }
     Ok(sets)
 }

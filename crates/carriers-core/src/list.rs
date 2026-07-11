@@ -40,6 +40,7 @@ pub const SIGNED_HEADERS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListConfig {
     /// Posting address, e.g. `dev@lists.example.org`.
     pub posting_address: String,
@@ -95,6 +96,7 @@ fn default_policy() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeyConfig {
     pub selector: String,
     pub key_file: PathBuf,

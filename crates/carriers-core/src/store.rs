@@ -15,10 +15,16 @@ use crate::error::Result;
 static MIGRATOR: Migrator = sqlx::migrate!();
 
 /// A member of a list, with their roles and bounce state.
+///
+/// The three roles are independent flags, not a hierarchy: a subscriber is not automatically a
+/// poster, and a poster is not automatically a subscriber. An address can hold any combination.
 pub struct Member {
     pub address: String,
     /// True if the member receives the list (a subscriber).
     pub subscribed: bool,
+    /// True if the member may post directly under the `posters` policy (see
+    /// [`crate::policy`]), independent of whether they are subscribed.
+    pub poster: bool,
     /// True if the member is a moderator of the list.
     pub moderator: bool,
     /// Running bounce score.
@@ -39,8 +45,9 @@ pub struct HeldSummary {
 /// Row shape returned by the moderation-queue summary query.
 type HeldRow = (i64, String, Option<String>, Option<String>, i64);
 
-/// Row shape returned by the member query: (address, subscribed, moderator, score, disabled).
-type MemberRow = (String, i64, i64, f64, i64);
+/// Row shape returned by the member query: (address, subscribed, poster, moderator, score,
+/// disabled).
+type MemberRow = (String, i64, i64, i64, f64, i64);
 
 /// A full held message, including everything needed to distribute it on approval.
 pub struct HeldMessage {
@@ -84,23 +91,28 @@ impl Store {
 
     // --- Membership ---------------------------------------------------------------------
 
-    /// Add a member. `subscribed` marks whether they receive the list; `moderator` marks the
-    /// moderator role. Re-adding updates both roles.
+    /// Add a member with the given independent roles (see [`Member`]). Re-adding updates all
+    /// three roles.
     pub async fn add_member(
         &self,
         list: &str,
         address: &str,
         subscribed: bool,
+        poster: bool,
         moderator: bool,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO members(list, address, subscribed, moderator) VALUES(?, ?, ?, ?) \
+            "INSERT INTO members(list, address, subscribed, poster, moderator) \
+             VALUES(?, ?, ?, ?, ?) \
              ON CONFLICT(list, address) DO UPDATE SET \
-                 subscribed = excluded.subscribed, moderator = excluded.moderator",
+                 subscribed = excluded.subscribed, \
+                 poster = excluded.poster, \
+                 moderator = excluded.moderator",
         )
         .bind(list)
         .bind(address.trim().to_ascii_lowercase())
         .bind(subscribed as i64)
+        .bind(poster as i64)
         .bind(moderator as i64)
         .execute(&self.pool)
         .await?;
@@ -116,7 +128,7 @@ impl Store {
         Ok(())
     }
 
-    /// True if the address is recorded for the list at all (subscriber or not).
+    /// True if the address is recorded for the list at all, under any role.
     pub async fn is_member(&self, list: &str, address: &str) -> Result<bool> {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM members WHERE list = ? AND address = ?")
@@ -131,6 +143,19 @@ impl Store {
     pub async fn is_subscriber(&self, list: &str, address: &str) -> Result<bool> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM members WHERE list = ? AND address = ? AND subscribed = 1",
+        )
+        .bind(list)
+        .bind(address.trim().to_ascii_lowercase())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
+    /// True if the address is a poster of the list (may post directly under the `posters`
+    /// policy), independent of whether it is also a subscriber.
+    pub async fn is_poster(&self, list: &str, address: &str) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM members WHERE list = ? AND address = ? AND poster = 1",
         )
         .bind(list)
         .bind(address.trim().to_ascii_lowercase())
@@ -154,7 +179,7 @@ impl Store {
     /// All members of the list with their roles and bounce state.
     pub async fn all_members(&self, list: &str) -> Result<Vec<Member>> {
         let rows: Vec<MemberRow> = sqlx::query_as(
-            "SELECT address, subscribed, moderator, bounce_score, bounce_disabled \
+            "SELECT address, subscribed, poster, moderator, bounce_score, bounce_disabled \
              FROM members WHERE list = ? ORDER BY address",
         )
         .bind(list)
@@ -163,9 +188,10 @@ impl Store {
         Ok(rows
             .into_iter()
             .map(
-                |(address, subscribed, moderator, bounce_score, bounce_disabled)| Member {
+                |(address, subscribed, poster, moderator, bounce_score, bounce_disabled)| Member {
                     address,
                     subscribed: subscribed != 0,
+                    poster: poster != 0,
                     moderator: moderator != 0,
                     bounce_score,
                     bounce_disabled: bounce_disabled != 0,
