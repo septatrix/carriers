@@ -57,12 +57,24 @@ fn cache(entries: &[(&str, &str, &str)]) -> StaticCache {
     StaticCache { map }
 }
 
-/// Generate an RSA key, write the private PEM into `dir`, and return
+/// Generate an Ed25519 key, write the private DER into `dir`, and return
 /// `(key_file, "v=DKIM1;..." record)`.
 fn make_key(dir: &std::path::Path, name: &str) -> (std::path::PathBuf, String) {
-    let key = keygen::generate(Algorithm::Ed25519, 0).expect("rsa keygen");
+    make_key_with(dir, name, Algorithm::Ed25519)
+}
+
+fn make_key_with(
+    dir: &std::path::Path,
+    name: &str,
+    algorithm: Algorithm,
+) -> (std::path::PathBuf, String) {
+    let bits = match algorithm {
+        Algorithm::Rsa => 2048,
+        Algorithm::Ed25519 => 0,
+    };
+    let key = keygen::generate(algorithm, bits).expect("key generation");
     let path = dir.join(name);
-    std::fs::write(&path, key.private_pem).unwrap();
+    std::fs::write(&path, key.private_der).unwrap();
     (path, key.dns_txt)
 }
 
@@ -147,8 +159,8 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[test]
 fn augment_preserves_body_and_adds_list_headers() {
     let dir = tempdir();
-    let (dkim_file, _) = make_key(&dir, "dkim.pem");
-    let (arc_file, _) = make_key(&dir, "arc.pem");
+    let (dkim_file, _) = make_key(&dir, "dkim.der");
+    let (arc_file, _) = make_key(&dir, "arc.der");
     let list = build_list(&dir, &dkim_file, &arc_file);
 
     let augmented = transform::augment(&list, FIXTURE);
@@ -170,11 +182,48 @@ fn augment_preserves_body_and_adds_list_headers() {
 }
 
 #[tokio::test]
+async fn rsa_der_key_signs_and_verifies() {
+    // RSA keys are read as raw PKCS#1 DER (constructed by hand into a `PrivateKeyDer::Pkcs1`),
+    // unlike Ed25519's PKCS#8 — exercise that path specifically rather than relying only on
+    // the Ed25519 coverage used elsewhere in this file.
+    let dir = tempdir();
+    let (key_file, dns_txt) = make_key_with(&dir, "rsa.der", Algorithm::Rsa);
+
+    let key = load_dkim_key(&KeyConfig {
+        selector: "rsatest".into(),
+        key_file,
+        algorithm: Algorithm::Rsa,
+        domain: Some("example.com".into()),
+    })
+    .unwrap();
+    let signer = DkimSigner::from_key(key)
+        .domain("example.com")
+        .selector("rsatest")
+        .headers(["From", "To", "Subject"].iter().map(|s| s.to_string()));
+    let signature = signer.sign(FIXTURE).unwrap();
+    let mut signed = signature.to_header().into_bytes();
+    signed.extend_from_slice(FIXTURE);
+
+    let message = AuthenticatedMessage::parse(&signed).unwrap();
+    let cache = cache(&[("rsatest", "example.com", &dns_txt)]);
+    let authenticator = MessageAuthenticator::new_cloudflare().unwrap();
+    let results = authenticator
+        .verify_dkim(Parameters::new(&message).with_txt_cache(&cache))
+        .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].result(),
+        &DkimResult::Pass,
+        "RSA DER key must sign a message that verifies against its published SPKI record"
+    );
+}
+
+#[tokio::test]
 async fn author_dkim_survives_and_list_dkim_is_valid() {
     let dir = tempdir();
-    let (author_file, author_txt) = make_key(&dir, "author.pem");
-    let (dkim_file, dkim_txt) = make_key(&dir, "dkim.pem");
-    let (arc_file, _arc_txt) = make_key(&dir, "arc.pem");
+    let (author_file, author_txt) = make_key(&dir, "author.der");
+    let (dkim_file, dkim_txt) = make_key(&dir, "dkim.der");
+    let (arc_file, _arc_txt) = make_key(&dir, "arc.der");
     let list = build_list(&dir, &dkim_file, &arc_file);
 
     // Inbound message with the author's signature, then our List-* headers, then our signature.
@@ -207,8 +256,8 @@ async fn author_dkim_survives_and_list_dkim_is_valid() {
 #[tokio::test]
 async fn arc_seal_produces_a_valid_chain() {
     let dir = tempdir();
-    let (dkim_file, _) = make_key(&dir, "dkim.pem");
-    let (arc_file, arc_txt) = make_key(&dir, "arc.pem");
+    let (dkim_file, _) = make_key(&dir, "dkim.der");
+    let (arc_file, arc_txt) = make_key(&dir, "arc.der");
     let list = build_list(&dir, &dkim_file, &arc_file);
     let authenticator = MessageAuthenticator::new_cloudflare().unwrap();
 

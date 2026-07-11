@@ -60,8 +60,8 @@ The workspace is split into `carriers-core` (the message pipeline, no network) a
 
 ```sh
 # 1. Generate DKIM and ARC keys for the list domain (prints the DNS records to publish).
-carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.pem
-carriers genkey --algorithm ed25519 --selector arc  --domain lists.example.org --out /etc/carriers/keys/dev.arc.pem
+carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.der
+carriers genkey --algorithm ed25519 --selector arc  --domain lists.example.org --out /etc/carriers/keys/dev.arc.der
 
 # 2. Write config and a list definition (see examples/).
 cp examples/carriers.toml   /etc/carriers/carriers.toml

@@ -13,8 +13,9 @@ use crate::error::{Error, Result};
 use crate::list::Algorithm;
 
 pub struct GeneratedKey {
-    /// PEM-encoded private key, to be written to the list's `key_file`.
-    pub private_pem: String,
+    /// DER-encoded private key (PKCS#8 for Ed25519, PKCS#1 for RSA), to be written as-is to
+    /// the list's `key_file`.
+    pub private_der: Vec<u8>,
     /// The DNS TXT record value to publish at `<selector>._domainkey.<domain>`.
     pub dns_txt: String,
 }
@@ -24,8 +25,6 @@ pub fn generate(algorithm: Algorithm, rsa_bits: usize) -> Result<GeneratedKey> {
         Algorithm::Rsa => {
             let pair = DkimKeyPair::generate_rsa(rsa_bits)
                 .map_err(|e| Error::Key(format!("RSA key generation failed: {e}")))?;
-            // `private_key()` is PKCS#1 DER.
-            let private_pem = der_to_pem(pair.private_key(), "RSA PRIVATE KEY");
             // `public_key()` is PKCS#1 DER; convert to SPKI for the DNS record.
             let spki = rsa::RsaPublicKey::from_pkcs1_der(pair.public_key())
                 .map_err(|e| Error::Key(format!("RSA public key decode: {e}")))?
@@ -33,31 +32,19 @@ pub fn generate(algorithm: Algorithm, rsa_bits: usize) -> Result<GeneratedKey> {
                 .map_err(|e| Error::Key(format!("RSA public key SPKI encode: {e}")))?;
             let p = base64::engine::general_purpose::STANDARD.encode(spki.as_bytes());
             Ok(GeneratedKey {
-                private_pem,
+                // `private_key()` is PKCS#1 DER.
+                private_der: pair.private_key().to_vec(),
                 dns_txt: format!("v=DKIM1; k=rsa; p={p}"),
             })
         }
         Algorithm::Ed25519 => {
             let pair = DkimKeyPair::generate_ed25519()
                 .map_err(|e| Error::Key(format!("Ed25519 key generation failed: {e}")))?;
-            // `private_key()` is PKCS#8 DER; `encoded_public_key()` is the base64 raw key.
-            let private_pem = der_to_pem(pair.private_key(), "PRIVATE KEY");
             Ok(GeneratedKey {
-                private_pem,
+                // `private_key()` is PKCS#8 DER.
+                private_der: pair.private_key().to_vec(),
                 dns_txt: format!("v=DKIM1; k=ed25519; p={}", pair.encoded_public_key()),
             })
         }
     }
-}
-
-fn der_to_pem(der: &[u8], label: &str) -> String {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut out = format!("-----BEGIN {label}-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        // chunk is always valid ASCII base64.
-        out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
-        out.push('\n');
-    }
-    out.push_str(&format!("-----END {label}-----\n"));
-    out
 }

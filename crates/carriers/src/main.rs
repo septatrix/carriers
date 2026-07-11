@@ -74,7 +74,8 @@ struct GenkeyArgs {
     /// Signing domain (for the printed record name).
     #[arg(long, default_value = "example.org")]
     domain: String,
-    /// Write the private key here instead of stdout.
+    /// Write the raw DER-encoded private key here instead of stdout (recommended: printing
+    /// binary DER to a terminal is not useful; redirect stdout to a file if `--out` is omitted).
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -158,11 +159,11 @@ fn genkey(args: GenkeyArgs) -> Result<()> {
     let key = keygen::generate(args.algorithm.into(), args.bits)?;
     match &args.out {
         Some(path) => {
-            std::fs::write(path, &key.private_pem)
+            std::fs::write(path, &key.private_der)
                 .with_context(|| format!("writing private key to {}", path.display()))?;
             eprintln!("Private key written to {}", path.display());
         }
-        None => print!("{}", key.private_pem),
+        None => std::io::stdout().write_all(&key.private_der)?,
     }
     eprintln!();
     eprintln!("Publish this DNS TXT record:");

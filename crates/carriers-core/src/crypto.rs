@@ -1,29 +1,31 @@
-//! Loading of DKIM/ARC signing keys from PEM files.
+//! Loading of DKIM/ARC signing keys from DER-encoded key files.
 
-use base64::Engine;
 use mail_auth::common::crypto::{DkimKey, Ed25519Key, RsaKey, Sha256};
+use rustls_pki_types::{PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer};
 
 use crate::error::{Error, Result};
 use crate::list::{Algorithm, KeyConfig};
 
 /// Load a signing key described by `cfg` into a [`DkimKey`] usable by both the
 /// [`mail_auth::dkim::DkimSigner`] and [`mail_auth::arc::ArcSealer`].
+///
+/// Keys are read as raw DER, not PEM: RSA keys as PKCS#8 or PKCS#1, Ed25519 keys as PKCS#8.
+/// `carriers genkey` writes keys in this format.
 pub fn load_dkim_key(cfg: &KeyConfig) -> Result<DkimKey> {
-    let pem = std::fs::read_to_string(&cfg.key_file)
+    let der = std::fs::read(&cfg.key_file)
         .map_err(|e| Error::Key(format!("reading {}: {e}", cfg.key_file.display())))?;
     match cfg.algorithm {
         Algorithm::Rsa => {
-            // Accept both PKCS#8 (`BEGIN PRIVATE KEY`) and PKCS#1 (`BEGIN RSA PRIVATE KEY`).
-            #[allow(deprecated)]
-            let key = RsaKey::<Sha256>::from_pkcs8_pem(&pem)
-                .or_else(|_| RsaKey::<Sha256>::from_rsa_pem(&pem))
-                .map_err(|e| {
-                    Error::Key(format!("parsing RSA key {}: {e}", cfg.key_file.display()))
-                })?;
+            let key = RsaKey::<Sha256>::from_key_der(PrivateKeyDer::Pkcs8(
+                PrivatePkcs8KeyDer::from(der.clone()),
+            ))
+            .or_else(|_| {
+                RsaKey::<Sha256>::from_key_der(PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(der)))
+            })
+            .map_err(|e| Error::Key(format!("parsing RSA key {}: {e}", cfg.key_file.display())))?;
             Ok(DkimKey::Rsa(key))
         }
         Algorithm::Ed25519 => {
-            let der = pem_to_der(&pem, "PRIVATE KEY")?;
             let key = Ed25519Key::from_pkcs8_der(&der).map_err(|e| {
                 Error::Key(format!(
                     "parsing Ed25519 key {}: {e}",
@@ -33,22 +35,4 @@ pub fn load_dkim_key(cfg: &KeyConfig) -> Result<DkimKey> {
             Ok(DkimKey::Ed25519(key))
         }
     }
-}
-
-/// Extract the DER payload of a single PEM block with the given `label`
-/// (e.g. `"PRIVATE KEY"`).
-pub fn pem_to_der(pem: &str, label: &str) -> Result<Vec<u8>> {
-    let begin = format!("-----BEGIN {label}-----");
-    let end = format!("-----END {label}-----");
-    let start = pem
-        .find(&begin)
-        .ok_or_else(|| Error::Key(format!("PEM missing `{begin}`")))?;
-    let body = &pem[start + begin.len()..];
-    let stop = body
-        .find(&end)
-        .ok_or_else(|| Error::Key(format!("PEM missing `{end}`")))?;
-    let b64: String = body[..stop].split_whitespace().collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(b64.as_bytes())
-        .map_err(|e| Error::Key(format!("PEM base64 decode: {e}")))
 }

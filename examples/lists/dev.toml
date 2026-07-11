@@ -15,17 +15,17 @@ subscribe_url = "https://lists.example.org/subscribe/dev"
 unsubscribe_oneclick = "https://lists.example.org/u/dev?token=..."
 
 # DKIM signing key for the list domain. Generate with:
-#   carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.pem
+#   carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.der
 [dkim]
 selector = "dkim"
-key_file = "/etc/carriers/keys/dev.dkim.pem"
+key_file = "/etc/carriers/keys/dev.dkim.der"
 algorithm = "ed25519" # or "rsa"
 # domain = "lists.example.org"  # defaults to the posting address domain
 
 # ARC sealing key. Use a distinct selector from DKIM.
 [arc]
 selector = "arc"
-key_file = "/etc/carriers/keys/dev.arc.pem"
+key_file = "/etc/carriers/keys/dev.arc.der"
 algorithm = "ed25519"
 
 [policy]
