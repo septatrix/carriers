@@ -103,12 +103,9 @@ pub async fn intake(
 
     let sender = from_address(&parsed);
 
-    // Every list is moderated by a Sieve policy: either the one named in its config, or the
-    // built-in policy for its `posting` mode. Both run through the same engine.
-    let policy_name = match &list.cfg.policy.sieve {
-        Some(name) => name.as_str(),
-        None => list.cfg.policy.posting.policy_name(),
-    };
+    // Every list is moderated by a Sieve policy, named by `list.cfg.policy` — either a
+    // built-in name or a custom `<name>.sieve` file; both run through the same engine.
+    let policy_name = list.cfg.policy.as_str();
     let sets = membership_sets(members, &list.name).await?;
     let approved = match policy.evaluate(policy_name, &list.name, &ingress.mail_from, raw, &sets)? {
         PolicyDecision::Approve => true,

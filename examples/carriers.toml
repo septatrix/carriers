@@ -18,8 +18,9 @@ db_path = "/var/lib/carriers/carriers.db"
 # Directory of per-list `<name>.toml` files.
 lists_dir = "/etc/carriers/lists"
 
-# Directory of Sieve moderation policies (`<name>.sieve`). Only needed if a list selects a
-# `[policy] sieve` script. Each file's name (without extension) is the policy name.
+# Directory of custom Sieve moderation policies (`<name>.sieve`). Only needed if a list's
+# `policy` names a custom script rather than a built-in policy. Each file's name (without
+# extension) is the policy name.
 policies_dir = "/etc/carriers/policies"
 
 [smarthost]

@@ -77,13 +77,21 @@ pub struct ListConfig {
     /// ARC sealing key for the list domain.
     pub arc: KeyConfig,
 
-    #[serde(default)]
-    pub policy: Policy,
+    /// The moderation policy: either a built-in name (see [`crate::policy`]) or the name of a
+    /// custom `<name>.sieve` file in `policies_dir`. Built-in and custom policies are compiled
+    /// into the same [`crate::policy::PolicyEngine`] and looked up by this one name — there is
+    /// no separate configuration shape for "use a built-in mode" vs. "use a custom script".
+    #[serde(default = "default_policy")]
+    pub policy: String,
 
     /// Optional flat member seed file (one address per line, `#` comments), imported into
     /// SQLite on `carriers list sync`.
     #[serde(default)]
     pub members_file: Option<PathBuf>,
+}
+
+fn default_policy() -> String {
+    crate::policy::BUILTIN_SUBSCRIBERS.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,49 +111,6 @@ pub enum Algorithm {
     #[default]
     Rsa,
     Ed25519,
-}
-
-/// Who may post to a list, and what happens to posts from anyone else.
-///
-/// Under `Subscribers` and `Members`, a post from a sender who is *not* permitted is held for
-/// moderation rather than dropped, so a moderator can approve it. `Moderated` holds every post.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PostingPolicy {
-    /// Anyone may post; nothing is moderated (an open list).
-    Open,
-    /// Subscribers (addresses that receive the list) may post directly; others are held.
-    #[default]
-    Subscribers,
-    /// Any address recorded in the member database may post directly (a superset of
-    /// subscribers, since a member need not be subscribed to receive mail); others are held.
-    Members,
-    /// Every post is held for moderation, regardless of sender.
-    Moderated,
-}
-
-impl PostingPolicy {
-    /// The name of the built-in Sieve policy implementing this mode.
-    pub fn policy_name(self) -> &'static str {
-        match self {
-            PostingPolicy::Open => crate::policy::BUILTIN_OPEN,
-            PostingPolicy::Subscribers => crate::policy::BUILTIN_SUBSCRIBERS,
-            PostingPolicy::Members => crate::policy::BUILTIN_MEMBERS,
-            PostingPolicy::Moderated => crate::policy::BUILTIN_MODERATED,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Policy {
-    /// Who may post, and how non-permitted posts are handled. Used when `sieve` is unset.
-    #[serde(default)]
-    pub posting: PostingPolicy,
-
-    /// Name of a Sieve moderation policy (a `<name>.sieve` file in `policies_dir`). When set,
-    /// it decides approve/moderate/reject and takes precedence over `posting`.
-    #[serde(default)]
-    pub sieve: Option<String>,
 }
 
 /// A loaded mailing list, with its signer and sealer constructed once at load time.

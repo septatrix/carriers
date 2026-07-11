@@ -28,19 +28,18 @@ selector = "arc"
 key_file = "/etc/carriers/keys/dev.arc.der"
 algorithm = "ed25519"
 
-[policy]
-# Who may post, and what happens to everyone else's posts:
+# The moderation policy: a built-in name, or the name of a custom `<name>.sieve` file in
+# policies_dir (see examples/policies/). Held posts wait in a queue; review them with
+# `carriers moderate`.
+#
+# Built-in policies:
 #   "open"        - anyone may post; nothing is moderated
 #   "subscribers" - subscribers post directly; other senders are held for moderation (default)
 #   "members"     - any address in the member database posts directly (a superset of
 #                   subscribers, since a member need not be subscribed); others are held
 #   "moderated"   - every post is held for moderation
-# Held posts wait in a queue; review them with `carriers moderate`.
-posting = "subscribers"
-
-# Alternatively, drive moderation with a Sieve policy (a `<name>.sieve` file in policies_dir).
-# When set, `sieve` takes precedence over `posting`. See examples/policies/.
-# sieve = "moderated-members"
+policy = "subscribers"
+# policy = "moderated-members"  # a custom Sieve policy instead
 
 # Optional flat member seed file (one address per line, `#` comments). Import with
 # `carriers sync`.

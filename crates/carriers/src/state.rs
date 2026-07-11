@@ -67,16 +67,15 @@ impl AppState {
     }
 }
 
-/// Fail fast if a list references a Sieve policy that was not loaded.
+/// Fail fast if a list references a policy name that was not loaded (built-in or custom).
 fn validate_policies(lists: &HashMap<String, Arc<List>>, policy: &PolicyEngine) -> Result<()> {
     for list in lists.values() {
-        if let Some(name) = &list.cfg.policy.sieve {
-            if !policy.contains(name) {
-                anyhow::bail!(
-                    "list `{}` references unknown Sieve policy `{name}`",
-                    list.name
-                );
-            }
+        if !policy.contains(&list.cfg.policy) {
+            anyhow::bail!(
+                "list `{}` references unknown policy `{}`",
+                list.name,
+                list.cfg.policy
+            );
         }
     }
     Ok(())

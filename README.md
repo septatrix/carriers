@@ -118,18 +118,19 @@ expect.
 
 ## Posting policy and moderation
 
-Each list sets a `[policy] posting` mode (see [`examples/lists/dev.toml`](examples/lists/dev.toml)):
+Each list names its moderation policy with a single `policy = "<name>"` field (see
+[`examples/lists/dev.toml`](examples/lists/dev.toml)) — either one of the built-in policies, or
+the name of a custom `<name>.sieve` file the administrator places in `policies_dir` (see
+[`examples/policies/`](examples/policies/)). Both are compiled into the same engine at startup
+and looked up by the same name — there is no separate "use a built-in mode" vs. "use a custom
+script" configuration shape.
 
-| Mode | Who may post directly | Everyone else |
+| Built-in policy | Who may post directly | Everyone else |
 | --- | --- | --- |
 | `open` | anyone | — |
 | `subscribers` (default) | subscribers (receive the list) | held for moderation |
 | `members` | any address in the member database (a superset of subscribers — a member may post without being subscribed) | held for moderation |
 | `moderated` | nobody | held for moderation |
-
-These four modes are themselves implemented as built-in Sieve scripts and evaluated through the
-same engine as custom policies (below), so there is a single moderation code path. Their names
-are reserved — a custom `<name>.sieve` may not reuse them.
 
 Held posts wait in a per-list queue. Review them with `carriers moderate list`, inspect one with
 `carriers moderate show <id>`, then `carriers moderate approve <id>` (distributes it) or
@@ -138,11 +139,10 @@ Held posts wait in a per-list queue. Review them with `carriers moderate list`, 
 
 ### Sieve policies
 
-For richer rules, a list can delegate the decision to a **Sieve** script instead of the
-built-in modes: set `[policy] sieve = "<name>"`, where `<name>.sieve` is a file the administrator
-places in `policies_dir` (see [`examples/policies/`](examples/policies/)). Policies are global
-and static — compiled once at startup — and take precedence over `posting`. The script decides
-with ordinary Sieve actions:
+For richer rules, name a custom **Sieve** script instead of a built-in policy: `policy` becomes
+the file's name (without extension) and carriers compiles `<name>.sieve` from `policies_dir`.
+Policies are global and static — compiled once at startup. The script decides with ordinary
+Sieve actions:
 
 - `keep;` (or an empty script) — **approve** and distribute now
 - `fileinto "moderate";` — **hold** for moderation

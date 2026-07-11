@@ -1,12 +1,14 @@
 //! Sieve-based moderation policies.
 //!
-//! A policy is a Sieve script file (`<name>.sieve`) placed in the configured policies directory
-//! by the administrator; a list selects one by name via `[policy] sieve = "<name>"`. Policies
-//! are global and static — compiled once at startup.
+//! A custom policy is a Sieve script file (`<name>.sieve`) placed in the configured policies
+//! directory by the administrator; a list selects a policy — built-in or custom — by name via
+//! its single `policy = "<name>"` config field. Policies are global and static — compiled once
+//! at startup.
 //!
-//! The four built-in `[policy] posting` modes (`open`, `subscribers`, `members`, `moderated`)
-//! are themselves compiled Sieve scripts (see [`BUILTIN_SCRIPTS`]), so every list — whether it
-//! uses a built-in mode or a custom script — is moderated through this one engine.
+//! The four built-in policies (`open`, `subscribers`, `members`, `moderated`) are themselves
+//! compiled Sieve scripts (see [`BUILTIN_SCRIPTS`]), so every list — whether it names a
+//! built-in policy or a custom script — is moderated through this one engine, looked up by the
+//! same name.
 //!
 //! A script decides what happens to a post through ordinary Sieve actions:
 //!
@@ -41,9 +43,9 @@ pub const LIST_SUBSCRIBERS: &str = "subscribers";
 pub const LIST_MEMBERS: &str = "members";
 pub const LIST_MODERATORS: &str = "moderators";
 
-/// Names of the built-in policies. These mirror the `[policy] posting` modes and are reserved:
-/// an administrator's `<name>.sieve` file may not use them. Each is itself a Sieve script (see
-/// [`BUILTIN_SCRIPTS`]), so built-in and custom policies share one evaluation path.
+/// Names of the built-in policies. These are reserved: an administrator's `<name>.sieve` file
+/// may not use them. Each is itself a Sieve script (see [`BUILTIN_SCRIPTS`]), so built-in and
+/// custom policies share one evaluation path.
 pub const BUILTIN_OPEN: &str = "open";
 pub const BUILTIN_SUBSCRIBERS: &str = "subscribers";
 pub const BUILTIN_MEMBERS: &str = "members";
