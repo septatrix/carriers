@@ -218,6 +218,12 @@ Deferred / ideas:
 - add CI, including [REUSE](https://reuse.software/) license-compliance checking (`reuse lint`)
   to keep licensing machine-readable and consistent (esp. given the MPL-2.0 project vs the
   AGPL-3.0 `sieve-rs` dependency)
+- actually *handle* one-click unsubscribe (RFC 8058), not just advertise it: carriers emits
+  `List-Unsubscribe`/`List-Unsubscribe-Post` today, but processing the click is left entirely
+  to whatever `unsubscribe_oneclick` URL the admin points at. Implement it end to end via
+  either a `mailto:` target carriers listens on itself, or a minimal HTTP endpoint that accepts
+  the RFC 8058 POST — routed through `MemberProvider` (an `unsubscribe`-style method) so it
+  works uniformly against SQLite today and a future pull-based provider without special-casing
 
 ## License
 
