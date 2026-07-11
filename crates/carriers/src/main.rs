@@ -385,9 +385,37 @@ fn policies(config_path: &Path) -> Result<()> {
     } else {
         println!("custom:   {}", names.join(", "));
     }
-    match &config.global_policy_file {
-        Some(path) => println!("global:   {}", path.display()),
-        None => println!("global:   (none)"),
+    match (&config.global_policy.before, &config.global_policy.after) {
+        (None, None) => println!("global:   (none)"),
+        (before, after) => println!(
+            "global:   before={}, after={}",
+            before
+                .as_ref()
+                .map_or("(none)".to_string(), |p| p.display().to_string()),
+            after
+                .as_ref()
+                .map_or("(none)".to_string(), |p| p.display().to_string()),
+        ),
+    }
+    if config.global_policy.domains.is_empty() {
+        println!("domains:  (none)");
+    } else {
+        let mut domains: Vec<&String> = config.global_policy.domains.keys().collect();
+        domains.sort_unstable();
+        for domain in domains {
+            let scripts = &config.global_policy.domains[domain];
+            println!(
+                "domain {domain}: before={}, after={}",
+                scripts
+                    .before
+                    .as_ref()
+                    .map_or("(none)".to_string(), |p| p.display().to_string()),
+                scripts
+                    .after
+                    .as_ref()
+                    .map_or("(none)".to_string(), |p| p.display().to_string()),
+            );
+        }
     }
     Ok(())
 }

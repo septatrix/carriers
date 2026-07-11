@@ -70,9 +70,10 @@ pub fn decode_verp(address: &str) -> Option<(String, String)> {
     Some((format!("{base_local}@{domain}"), recipient))
 }
 
-/// Ingest an inbound post: discard loops/duplicates, run the optional global policy followed by
-/// the list's own posting policy (distributing, holding for moderation, discarding or
-/// rejecting, as appropriate), and prepare the message when it may go out now.
+/// Ingest an inbound post: discard loops/duplicates, run the full policy chain (global/domain
+/// scripts wrapped around the list's own posting policy — see
+/// [`crate::policy::PolicyEngine::evaluate_for_list`]) to decide whether to distribute, hold for
+/// moderation, discard, or reject it, and prepare the message when it may go out now.
 #[allow(clippy::too_many_arguments)]
 pub async fn intake(
     authenticator: &MessageAuthenticator,
@@ -112,62 +113,39 @@ pub async fn intake(
     let sender = from_address(&parsed);
     let sets = membership_sets(members, &list.name).await?;
 
-    // The optional global policy runs first, ahead of the list's own — see
-    // `PolicyEngine::evaluate_global` for why `Approve` here is not authoritative.
-    if let Some(decision) = policy.evaluate_global(&list.name, &ingress.mail_from, raw, &sets)? {
-        match decision {
-            PolicyDecision::Approve => {}
-            PolicyDecision::Moderate => {
-                return hold(
-                    store,
-                    list,
-                    ingress,
-                    sender.as_deref(),
-                    parsed.subject(),
-                    raw,
-                )
-                .await;
-            }
-            PolicyDecision::Discard => {
-                return Ok(Disposition::Discarded {
-                    reason: "discarded by global policy".into(),
-                });
-            }
-            PolicyDecision::Reject { reason } => {
-                return Ok(Disposition::Rejected { reason });
-            }
-        }
-    }
-
-    // Every list is moderated by a Sieve policy, named by `list.cfg.policy` — either a
-    // built-in name or a custom `<name>.sieve` file; both run through the same engine.
+    // Every list is moderated by a Sieve policy, named by `list.cfg.policy` — either a built-in
+    // name or a custom `<name>.sieve` file — wrapped in the global/domain tiers (see
+    // `PolicyEngine::evaluate_for_list`).
     let policy_name = list.cfg.policy.as_str();
-    let approved = match policy.evaluate(policy_name, &list.name, &ingress.mail_from, raw, &sets)? {
-        PolicyDecision::Approve => true,
-        PolicyDecision::Moderate => false,
-        PolicyDecision::Discard => {
-            return Ok(Disposition::Discarded {
-                reason: format!("discarded by policy `{policy_name}`"),
-            });
-        }
-        PolicyDecision::Reject { reason } => {
-            return Ok(Disposition::Rejected { reason });
-        }
-    };
+    let decision = policy.evaluate_for_list(
+        policy_name,
+        &list.name,
+        &list.domain,
+        &ingress.mail_from,
+        raw,
+        &sets,
+    )?;
 
-    if approved {
-        let prepared = finalize(authenticator, members, list, hostname, ingress, raw).await?;
-        Ok(Disposition::Distribute(prepared))
-    } else {
-        hold(
-            store,
-            list,
-            ingress,
-            sender.as_deref(),
-            parsed.subject(),
-            raw,
-        )
-        .await
+    match decision {
+        PolicyDecision::Approve => {
+            let prepared = finalize(authenticator, members, list, hostname, ingress, raw).await?;
+            Ok(Disposition::Distribute(prepared))
+        }
+        PolicyDecision::Moderate => {
+            hold(
+                store,
+                list,
+                ingress,
+                sender.as_deref(),
+                parsed.subject(),
+                raw,
+            )
+            .await
+        }
+        PolicyDecision::Discard => Ok(Disposition::Discarded {
+            reason: "discarded by policy".into(),
+        }),
+        PolicyDecision::Reject { reason } => Ok(Disposition::Rejected { reason }),
     }
 }
 

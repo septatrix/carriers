@@ -142,54 +142,236 @@ fn custom_policy_may_not_reuse_a_builtin_name() {
     assert!(PolicyEngine::load(dir.path()).is_err());
 }
 
-#[test]
-fn evaluate_global_is_none_when_unconfigured() {
-    let engine = PolicyEngine::new().unwrap();
-    let decision = engine
-        .evaluate_global(
-            "dev",
-            "anyone@example.com",
-            &message("anyone@example.com"),
-            &sets(),
-        )
-        .unwrap();
-    assert_eq!(decision, None);
+fn write_sieve(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    path
 }
 
 #[test]
-fn evaluate_global_runs_ahead_of_the_list_policy_and_sees_its_membership() {
+fn evaluate_for_list_without_any_global_scripts_just_runs_the_named_policy() {
     let dir = tempfile::tempdir().unwrap();
-    let global = dir.path().join("global.sieve");
-    std::fs::write(
-        &global,
-        r#"
-        require ["envelope", "extlists", "fileinto", "reject"];
-        if address :is "from" "spammer@evil.example" { discard; }
-        elsif address :list "from" "moderators"      { fileinto "moderate"; }
-        elsif address :is "from" "banned@evil.example" { reject "banned"; }
-        "#,
-    )
-    .unwrap();
-    let engine = PolicyEngine::new().unwrap().with_global(&global).unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let engine = PolicyEngine::load(dir.path()).unwrap();
 
-    let mut sets = sets();
-    sets.moderators.insert("mod@example.com".to_string());
+    let decision = engine
+        .evaluate_for_list(
+            "corporate",
+            "dev",
+            "lists.example.org",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .unwrap();
+    assert_eq!(decision, PolicyDecision::Approve);
+}
 
-    let eval = |from: &str| {
+#[test]
+fn global_before_short_circuits_ahead_of_the_list_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let before = write_sieve(
+        dir.path(),
+        "before.sieve",
+        r#"require "envelope"; if address :is "from" "spammer@evil.example" { discard; }"#,
+    );
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_before(&before)
+        .unwrap();
+
+    // spammer would otherwise hit POLICY's final `reject` branch, but the global before-script
+    // discards first, so the list policy never runs.
+    let decision = engine
+        .evaluate_for_list(
+            "corporate",
+            "dev",
+            "lists.example.org",
+            "spammer@evil.example",
+            &message("spammer@evil.example"),
+            &sets(),
+        )
+        .unwrap();
+    assert_eq!(decision, PolicyDecision::Discard);
+}
+
+#[test]
+fn global_before_no_opinion_falls_through_to_the_list_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let before = write_sieve(
+        dir.path(),
+        "before.sieve",
+        r#"require "envelope"; if address :is "from" "nobody@evil.example" { discard; }"#,
+    );
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_before(&before)
+        .unwrap();
+
+    // The before-script's condition never matches alice, so its implicit keep is not
+    // authoritative and the list policy (which approves subscribers) still decides.
+    let decision = engine
+        .evaluate_for_list(
+            "corporate",
+            "dev",
+            "lists.example.org",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .unwrap();
+    assert_eq!(decision, PolicyDecision::Approve);
+}
+
+#[test]
+fn domain_before_only_applies_to_its_own_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let before = write_sieve(dir.path(), "before.sieve", "discard;\n");
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_domain_before("lists.example.com", &before)
+        .unwrap();
+
+    let eval = |domain: &str| {
         engine
-            .evaluate_global("dev", from, &message(from), &sets)
+            .evaluate_for_list(
+                "corporate",
+                "dev",
+                domain,
+                "alice@example.com",
+                &message("alice@example.com"),
+                &sets(),
+            )
             .unwrap()
     };
 
-    // No opinion -> None is never returned once a global script is attached; an implicit keep
-    // maps to `Approve`, which the caller must *not* treat as authoritative.
-    assert_eq!(eval("alice@example.com"), Some(PolicyDecision::Approve));
-    assert_eq!(eval("spammer@evil.example"), Some(PolicyDecision::Discard));
-    assert_eq!(eval("mod@example.com"), Some(PolicyDecision::Moderate));
+    // The scoped domain's before-script discards unconditionally...
+    assert_eq!(eval("lists.example.com"), PolicyDecision::Discard);
+    // ...but a list in a different domain never sees it, so the list policy still approves.
+    assert_eq!(eval("lists.example.org"), PolicyDecision::Approve);
+}
+
+#[test]
+fn global_after_can_escalate_an_approval_from_the_list_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let after = write_sieve(
+        dir.path(),
+        "after.sieve",
+        r#"require ["envelope", "reject"]; if address :is "from" "alice@example.com" { reject "blocked instance-wide"; }"#,
+    );
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_after(&after)
+        .unwrap();
+
+    // The list policy approves alice (a subscriber), but the global after-script tightens it.
+    let decision = engine
+        .evaluate_for_list(
+            "corporate",
+            "dev",
+            "lists.example.org",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .unwrap();
     assert_eq!(
-        eval("banned@evil.example"),
-        Some(PolicyDecision::Reject {
-            reason: "banned".to_string()
-        })
+        decision,
+        PolicyDecision::Reject {
+            reason: "blocked instance-wide".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_before_hold_still_lets_the_after_tier_escalate_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let before = write_sieve(
+        dir.path(),
+        "before.sieve",
+        "require \"fileinto\"; fileinto \"moderate\";\n",
+    );
+    let after = write_sieve(
+        dir.path(),
+        "after.sieve",
+        r#"require ["envelope", "reject"]; reject "blocked instance-wide";"#,
+    );
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_before(&before)
+        .unwrap()
+        .with_global_after(&after)
+        .unwrap();
+
+    // The before-script holds every message (skipping the list policy entirely, since a hold
+    // has nothing left for it to add), but the after-script still runs and escalates the hold
+    // all the way to a reject.
+    let decision = engine
+        .evaluate_for_list(
+            "corporate",
+            "dev",
+            "lists.example.org",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .unwrap();
+    assert_eq!(
+        decision,
+        PolicyDecision::Reject {
+            reason: "blocked instance-wide".to_string()
+        }
+    );
+}
+
+#[test]
+fn full_chain_runs_in_order_global_before_domain_before_list_domain_after_global_after() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", "keep;\n"); // always approves on its own
+    let global_before = write_sieve(dir.path(), "gb.sieve", "# no opinion\n");
+    let domain_before = write_sieve(dir.path(), "db.sieve", "# no opinion\n");
+    let domain_after = write_sieve(
+        dir.path(),
+        "da.sieve",
+        "require \"fileinto\"; fileinto \"moderate\";\n",
+    );
+    let global_after = write_sieve(
+        dir.path(),
+        "ga.sieve",
+        r#"require ["envelope", "reject"]; reject "final word";"#,
+    );
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_before(&global_before)
+        .unwrap()
+        .with_domain_before("lists.example.com", &domain_before)
+        .unwrap()
+        .with_domain_after("lists.example.com", &domain_after)
+        .unwrap()
+        .with_global_after(&global_after)
+        .unwrap();
+
+    // global-before/domain-before have no opinion, so the list policy approves; domain-after
+    // then holds it, and global-after has the final word, escalating to a reject.
+    let decision = engine
+        .evaluate_for_list(
+            "corporate",
+            "dev",
+            "lists.example.com",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .unwrap();
+    assert_eq!(
+        decision,
+        PolicyDecision::Reject {
+            reason: "final word".to_string()
+        }
     );
 }

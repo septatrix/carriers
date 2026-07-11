@@ -1,6 +1,7 @@
 //! Global daemon configuration, loaded from `carriers.toml`.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -35,16 +36,50 @@ pub struct Config {
     #[serde(default)]
     pub policies_dir: Option<PathBuf>,
 
-    /// A Sieve script run for every list, after loop/duplicate detection but before the list's
-    /// own `policy` — see [`crate::policy::PolicyEngine::evaluate_global`]. Optional: if unset,
-    /// [`Config::load`] falls back to a `global.sieve` file next to this config file, if one
-    /// exists.
+    /// Global and per-domain Sieve scripts run around every list's own `policy` — see the
+    /// README's "Global policy" section.
     #[serde(default)]
-    pub global_policy_file: Option<PathBuf>,
+    pub global_policy: GlobalPolicyConfig,
 
     /// Bounce-handling thresholds.
     #[serde(default)]
     pub bounce: BounceConfig,
+}
+
+/// Sieve scripts that run for every list, before and/or after that list's own `policy` — see
+/// [`crate::policy::PolicyEngine`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalPolicyConfig {
+    /// Runs ahead of every list's own policy, regardless of the list's domain. Optional: if
+    /// unset, [`Config::load`] falls back to a `global.sieve` file next to this config file, if
+    /// one exists.
+    #[serde(default)]
+    pub before: Option<PathBuf>,
+
+    /// Runs after every list's own policy, regardless of the list's domain. Optional: if unset,
+    /// [`Config::load`] falls back to a `global-after.sieve` file next to this config file, if
+    /// one exists.
+    #[serde(default)]
+    pub after: Option<PathBuf>,
+
+    /// Additional before/after scripts scoped to one list domain (e.g. `lists.example.com`),
+    /// keyed by that domain. These run in addition to `before`/`after` above, closer to the
+    /// list's own policy: `before` (global) -> `before` (this domain) -> the list's own policy
+    /// -> `after` (this domain) -> `after` (global). Unlike `before`/`after` above, there is no
+    /// sibling-file auto-discovery for these — they must be configured explicitly.
+    #[serde(default)]
+    pub domains: HashMap<String, DomainPolicyConfig>,
+}
+
+/// Before/after Sieve scripts scoped to one list domain — see [`GlobalPolicyConfig::domains`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainPolicyConfig {
+    #[serde(default)]
+    pub before: Option<PathBuf>,
+    #[serde(default)]
+    pub after: Option<PathBuf>,
 }
 
 /// Controls when a repeatedly-bouncing subscriber has delivery disabled.
@@ -115,15 +150,21 @@ fn default_smarthost_port() -> u16 {
 }
 
 impl Config {
-    /// Load and parse `path`. If `global_policy_file` is not set, a `global.sieve` file next to
-    /// `path` is used automatically if present.
+    /// Load and parse `path`. If `global_policy.before`/`.after` are not set, `global.sieve` /
+    /// `global-after.sieve` files next to `path` are used automatically if present.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let mut config: Config = toml::from_str(&text)?;
-        if config.global_policy_file.is_none() {
+        if config.global_policy.before.is_none() {
             let sibling = path.with_file_name("global.sieve");
             if sibling.is_file() {
-                config.global_policy_file = Some(sibling);
+                config.global_policy.before = Some(sibling);
+            }
+        }
+        if config.global_policy.after.is_none() {
+            let sibling = path.with_file_name("global-after.sieve");
+            if sibling.is_file() {
+                config.global_policy.after = Some(sibling);
             }
         }
         Ok(config)

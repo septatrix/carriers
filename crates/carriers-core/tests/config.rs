@@ -19,40 +19,74 @@ host = "127.0.0.1"
 "#;
 
 #[test]
-fn global_policy_file_defaults_to_a_sibling_named_global_sieve() {
+fn global_before_and_after_default_to_sibling_files() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = write(dir.path(), "carriers.toml", MINIMAL);
-    let global_path = write(dir.path(), "global.sieve", "discard;\n");
+    let before_path = write(dir.path(), "global.sieve", "discard;\n");
+    let after_path = write(dir.path(), "global-after.sieve", "discard;\n");
 
     let config = Config::load(&config_path).unwrap();
-    assert_eq!(config.global_policy_file, Some(global_path));
+    assert_eq!(config.global_policy.before, Some(before_path));
+    assert_eq!(config.global_policy.after, Some(after_path));
 }
 
 #[test]
-fn global_policy_file_is_unset_without_a_sibling_or_explicit_path() {
+fn global_before_and_after_are_unset_without_a_sibling_or_explicit_path() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = write(dir.path(), "carriers.toml", MINIMAL);
 
     let config = Config::load(&config_path).unwrap();
-    assert_eq!(config.global_policy_file, None);
+    assert_eq!(config.global_policy.before, None);
+    assert_eq!(config.global_policy.after, None);
+    assert!(config.global_policy.domains.is_empty());
 }
 
 #[test]
-fn explicit_global_policy_file_overrides_the_sibling_default() {
+fn explicit_global_policy_overrides_the_sibling_defaults() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "global.sieve", "discard;\n");
-    let elsewhere = write(dir.path(), "elsewhere.sieve", "discard;\n");
-    // `global_policy_file` must precede the `[smarthost]` table, or TOML would attribute it to
-    // that table instead of the document root.
+    write(dir.path(), "global-after.sieve", "discard;\n");
+    let before = write(dir.path(), "elsewhere-before.sieve", "discard;\n");
+    let after = write(dir.path(), "elsewhere-after.sieve", "discard;\n");
+    // A `[table]` must come after all of `MINIMAL`'s bare top-level keys (and its own
+    // `[smarthost]` table), or TOML would attribute those bare keys to whichever table
+    // immediately precedes them instead of the document root.
     let config_path = write(
         dir.path(),
         "carriers.toml",
         &format!(
-            "global_policy_file = \"{}\"\n{MINIMAL}",
-            elsewhere.display()
+            "{MINIMAL}\n[global_policy]\nbefore = \"{}\"\nafter = \"{}\"\n",
+            before.display(),
+            after.display()
         ),
     );
 
     let config = Config::load(&config_path).unwrap();
-    assert_eq!(config.global_policy_file, Some(elsewhere));
+    assert_eq!(config.global_policy.before, Some(before));
+    assert_eq!(config.global_policy.after, Some(after));
+}
+
+#[test]
+fn per_domain_scripts_are_parsed() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = write(dir.path(), "domain-before.sieve", "discard;\n");
+    let after = write(dir.path(), "domain-after.sieve", "discard;\n");
+    let config_path = write(
+        dir.path(),
+        "carriers.toml",
+        &format!(
+            "{MINIMAL}\n[global_policy.domains.\"lists.example.com\"]\nbefore = \"{}\"\nafter = \"{}\"\n",
+            before.display(),
+            after.display()
+        ),
+    );
+
+    let config = Config::load(&config_path).unwrap();
+    let scoped = config
+        .global_policy
+        .domains
+        .get("lists.example.com")
+        .unwrap();
+    assert_eq!(scoped.before, Some(before));
+    assert_eq!(scoped.after, Some(after));
 }

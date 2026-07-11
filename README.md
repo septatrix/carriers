@@ -204,24 +204,48 @@ into the binary at compile time with `include_str!`) rather than inline Rust str
 
 ### Global policy
 
-Alongside each list's own `policy`, an optional **global** Sieve script (see
-[`examples/global.sieve`](examples/global.sieve)) can run for every list, right after loop and
-duplicate detection but before that list's own policy — so it still has access to the current
-list's membership sets, same as a per-list script. It's for rules that should apply everywhere
-regardless of list, e.g. a shared abuse blocklist.
+Alongside each list's own `policy`, further optional Sieve scripts can run wrapped around it,
+configured under `[global_policy]` in `carriers.toml` — right after loop and duplicate
+detection, so they still have access to the current list's membership sets, same as a per-list
+script. There are two axes:
 
-Set its path explicitly with `global_policy_file` in `carriers.toml`, or drop a `global.sieve`
-file next to `carriers.toml` and it's picked up automatically. Neither is required; without
-either, only each list's own policy runs.
+- **before / after**: a `before` script runs ahead of the list's own policy; an `after` script
+  runs once it has decided.
+- **instance-wide / per-domain**: `[global_policy]`'s own `before`/`after` apply to *every* list
+  regardless of domain; `[global_policy.domains."some.domain"]` adds another before/after pair
+  that only applies to lists whose posting address is under that one domain.
 
-An implicit keep (nothing in the script matched) is *not* authoritative — it just means the
-global script found no reason to act, and the list's own policy still runs normally afterwards.
-An explicit `fileinto "moderate"`, `discard`, or `reject` *is* authoritative and short-circuits
-before the list's own policy runs. There is deliberately no way for the global script to force
-an *approval* that bypasses the list's own policy — only to hold, discard, or reject ahead of
-it — since an ordinary `keep`/implicit-keep already means "no opinion," and giving it a second,
-authoritative meaning would make an empty or narrowly-scoped global script silently approve
-everything it doesn't otherwise mention.
+The full chain, for a list under a domain that has its own entry:
+
+```text
+global before -> domain before -> the list's own policy -> domain after -> global after
+```
+
+Any step that isn't configured is skipped. Set paths explicitly, or for the two instance-wide
+scripts, drop a `global.sieve` / `global-after.sieve` file next to `carriers.toml` and it's
+picked up automatically — domain-scoped scripts have no such auto-discovery and must be listed
+explicitly. See [`examples/carriers.toml`](examples/carriers.toml)'s `[global_policy]` table,
+and the example scripts [`examples/global.sieve`](examples/global.sieve) (instance-wide before),
+[`examples/global-after.sieve`](examples/global-after.sieve) (instance-wide after), and
+[`examples/lists.example.com-after.sieve`](examples/lists.example.com-after.sieve) (a
+domain-scoped after script, for `lists.example.com`).
+
+At every step, an implicit keep (nothing in the script matched) is *not* authoritative — it just
+means that script found no reason to act, so whatever was decided so far (`Approve`, unless an
+earlier step already decided otherwise) carries through unchanged. An explicit
+`fileinto "moderate"`, `discard`, or `reject` *is* authoritative and becomes the new decision so
+far. There is deliberately no way for a `before` script to force an *approval* that bypasses the
+list's own policy — only to hold, discard, or reject ahead of it — since an ordinary
+`keep`/implicit-keep already means "no opinion," and giving it a second, authoritative meaning
+would make an empty or narrowly-scoped script silently approve everything it doesn't otherwise
+mention.
+
+Once any step reaches `discard` or `reject`, the whole chain stops immediately — there is
+nothing left for a later step to add. A `before` script's `fileinto "moderate"` is different: it
+skips the list's own policy (which has nothing to add once the message is already held) but
+still lets the `after` scripts run, since those are specifically meant to have the last word —
+including tightening an existing hold into an outright reject, e.g. for a domain-wide compliance
+rule that must win regardless of what any single list's policy decided.
 
 ## Bounce handling
 
@@ -249,11 +273,11 @@ address is disabled — it is skipped as a recipient — until an operator runs
 ## Status / roadmap
 
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
-open / subscribers / posters / moderated modes, or a Sieve script), an optional global Sieve
-policy shared across all lists, VERP bounce processing with automatic delivery disabling, loop
-and duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost
-delivery, flat-file lists + SQLite membership (independent subscriber, poster and moderator
-roles), key generation.
+open / subscribers / posters / moderated modes, or a Sieve script), optional instance-wide and
+per-domain Sieve scripts wrapped before/after every list's own policy, VERP bounce processing
+with automatic delivery disabling, loop and duplicate suppression, `List-*` headers, aligned
+DKIM signing, ARC sealing, smarthost delivery, flat-file lists + SQLite membership (independent
+subscriber, poster and moderator roles), key generation.
 
 Deferred / ideas:
 
@@ -269,9 +293,9 @@ Deferred / ideas:
   scripts can call carriers-provided helpers — e.g. stripping an attachment, checking a value
   against an external service, or rewriting a header
 - a further, list-independent Sieve tier that runs *before* a message is even matched to a list
-  (upstream of loop/duplicate detection and the global policy described above), for checks that
-  don't need list membership at all — e.g. rejecting anything over a given size regardless of
-  which list it's addressed to. Unlike the global policy, this would currently need some
+  (upstream of loop/duplicate detection and the before/after tiers described above), for checks
+  that don't need list membership at all — e.g. rejecting anything over a given size regardless
+  of which list it's addressed to. Unlike those tiers, this would currently need some
   refactoring: the loop that receives a message and figures out which list it's for lives in the
   `carriers` binary crate's SMTP listener, not `carriers-core`, so this tier has no natural home
   yet

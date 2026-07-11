@@ -38,7 +38,9 @@ impl AppState {
         let policy = load_policy_engine(&config)?;
         info!(
             custom_policies = policy.names().count(),
-            global_policy = config.global_policy_file.is_some(),
+            global_before = config.global_policy.before.is_some(),
+            global_after = config.global_policy.after.is_some(),
+            domains = config.global_policy.domains.len(),
             "loaded policies"
         );
 
@@ -68,19 +70,36 @@ impl AppState {
 }
 
 /// Compile the policy engine named by `config`: built-ins, any custom scripts in
-/// `policies_dir`, and the global policy (if any) from `global_policy_file`.
+/// `policies_dir`, and the global/domain scripts from `config.global_policy`.
 pub fn load_policy_engine(config: &Config) -> Result<PolicyEngine> {
-    let policy = match &config.policies_dir {
+    let mut policy = match &config.policies_dir {
         Some(dir) => PolicyEngine::load(dir)
             .with_context(|| format!("loading Sieve policies from {}", dir.display()))?,
         None => PolicyEngine::new().context("compiling built-in policies")?,
     };
-    match &config.global_policy_file {
-        Some(path) => policy
-            .with_global(path)
-            .with_context(|| format!("loading global Sieve policy {}", path.display())),
-        None => Ok(policy),
+    if let Some(path) = &config.global_policy.before {
+        policy = policy
+            .with_global_before(path)
+            .with_context(|| format!("loading global before-policy {}", path.display()))?;
     }
+    if let Some(path) = &config.global_policy.after {
+        policy = policy
+            .with_global_after(path)
+            .with_context(|| format!("loading global after-policy {}", path.display()))?;
+    }
+    for (domain, scripts) in &config.global_policy.domains {
+        if let Some(path) = &scripts.before {
+            policy = policy.with_domain_before(domain, path).with_context(|| {
+                format!("loading domain `{domain}` before-policy {}", path.display())
+            })?;
+        }
+        if let Some(path) = &scripts.after {
+            policy = policy.with_domain_after(domain, path).with_context(|| {
+                format!("loading domain `{domain}` after-policy {}", path.display())
+            })?;
+        }
+    }
+    Ok(policy)
 }
 
 /// Fail fast if a list references a policy name that was not loaded (built-in or custom).
