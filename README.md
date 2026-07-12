@@ -3,6 +3,14 @@
 A simple mailing list manager written in Rust, built for compliance with **SPF, DKIM, DMARC
 and ARC** so that list mail is accepted by large providers (Google, Microsoft, Apple).
 
+carriers is also highly configurable and scriptable: posting/moderation policy, the optional
+global and per-domain before/after tiers, and even the built-in loop detection, duplicate
+suppression, `List-*` header injection, and DMARC enforcement gate are themselves ordinary
+**Sieve** scripts (RFC 5228/5429) — see "Posting policy and moderation", "Global policy", and
+"Built-in loop, duplicate, and header scripts" below. The built-in modes are just the shipped
+defaults, not a ceiling: an administrator can drop in fully custom `.sieve` logic at nearly every
+stage of the pipeline.
+
 ## Why DMARC breaks mailing lists — and how carriers stays compliant
 
 A message passes DMARC at the recipient only if an **aligned** authenticator still validates.
