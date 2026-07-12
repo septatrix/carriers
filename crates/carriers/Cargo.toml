@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "A simple mailing list manager built for SPF/DKIM/DMARC/ARC compliance"
 
+[lib]
+name = "carriers"
+path = "src/lib.rs"
+
 [[bin]]
 name = "carriers"
 path = "src/main.rs"

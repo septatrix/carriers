@@ -272,6 +272,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "carriers-testkit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "carriers",
+ "carriers-core",
+ "clap",
+ "hickory-proto",
+ "hickory-server",
+ "mail-auth",
+ "mail-send",
+ "smtp-proto",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -952,6 +971,7 @@ dependencies = [
  "rand 0.10.2",
  "ring",
  "rustls-pki-types",
+ "serde",
  "thiserror",
  "time",
  "tinyvec",
@@ -984,6 +1004,29 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
+name = "hickory-server"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "130236ba6abba90da6a7acf7a87b27d862b592c3145dc74bc47bf86d8ff198ec"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cfg-if",
+ "data-encoding",
+ "futures-util",
+ "hickory-net",
+ "hickory-proto",
+ "ipnet",
+ "prefix-trie",
+ "serde",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -2589,6 +2632,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "toml"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2750,6 +2806,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

@@ -312,6 +312,55 @@ address is disabled — it is skipped as a recipient — until an operator runs
 | `carriers policies` | List the compiled Sieve moderation policies. |
 | `carriers sync` | Import each list's flat `members_file` into SQLite. |
 
+## Local testing harness
+
+The `carriers-testkit` dev crate (`crates/carriers-testkit`) stands up a complete, throwaway
+mail world **in a single process** so you can watch how real messages fare end to end — the one
+thing unit tests can't show you: what a subscriber's server actually concludes about a delivered
+copy. It wires together three mocks and the *real* daemon:
+
+- a **mock authoritative DNS server**, driven by a zone file, that publishes the author's and the
+  list's DKIM/ARC keys plus their SPF and DMARC records (so verification resolves offline);
+- the **real carriers daemon**, run in-process as a task, with its DNS resolver injected
+  (`AppState::load` takes a `MessageAuthenticator`) so it points at the mock DNS;
+- a **capturing, scoring SMTP sink** in place of subscribers' servers: every delivered copy is
+  written to `captured/<n>.eml` and scored with `mail-auth` exactly as a receiving MTA would —
+  DKIM (per signature), ARC (`cv`), SPF, and the overall DMARC verdict with its aligned identity;
+- a **sender** that either crafts a message (optionally DKIM-signing it as the author, the way a
+  real MUA would) or replays an existing `.eml` verbatim.
+
+```console
+# Run the built-in scenarios with assertions (exits non-zero on any mismatch):
+$ cargo run -p carriers-testkit -- scenario --all
+
+=== scenario: author-signed-preject ===
+  delivered: dmarc=pass (dkim-align=pass, spf-align=fail) | dkim-pass=[lists.example.org+example.com] | arc=pass | ...
+  [OK  ] author DKIM survives (want yes, got yes)
+  [OK  ] list DKIM valid (want yes, got yes)
+  [OK  ] ARC cv=pass (want yes, got yes)
+  [OK  ] DMARC via DKIM alignment (want yes, got yes)
+  [OK  ] DMARC pass overall (want yes, got yes)
+  result: PASS
+```
+
+The bundled scenarios are `author-signed-preject` (a validly author-signed post from a `p=reject`
+domain — the core guarantee: the author's DKIM survives and DMARC passes via DKIM alignment at the
+subscriber), `no-dkim` (an unsigned post — the author domain can *not* pass DMARC via DKIM, only
+the list's own DKIM + ARC are valid), and `replay-eml` (an existing message from
+`examples/testkit/messages/` replayed verbatim).
+
+For interactive poking, bring the stack up and drive it by hand:
+
+```console
+$ cargo run -p carriers-testkit -- up          # prints the ingress port + ready-to-copy send lines
+# then, in another shell, inject a signed post or replay a real message:
+$ cargo run -p carriers-testkit -- send --ingress 127.0.0.1:<port> --sign --author-key <path> ...
+$ cargo run -p carriers-testkit -- send --ingress 127.0.0.1:<port> --eml some-message.eml
+```
+
+Delivered copies are scored live as they arrive. The harness only touches loopback and a temp
+directory; nothing leaves the machine.
+
 ## Status / roadmap
 
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
@@ -320,7 +369,8 @@ per-domain Sieve `.d` drop-in directories wrapped before/after every list's own 
 `.eml` archiving (`fileinto :copy "archive"`), VERP bounce processing with automatic delivery
 disabling, loop and duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing,
 smarthost delivery, flat-file lists + SQLite membership (independent subscriber, poster and
-moderator roles), key generation.
+moderator roles), key generation, and an in-process end-to-end test harness (`carriers-testkit`)
+with mock DNS + a scoring SMTP sink.
 
 Deferred / ideas:
 

@@ -25,15 +25,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn load(config: Config) -> Result<Self> {
+    /// Assemble the shared state. The DNS resolver used for inbound authentication is injected
+    /// as `authenticator` so callers choose the resolver: the daemon passes one built from the
+    /// system configuration, while tests (`carriers-testkit`) pass one aimed at a mock resolver.
+    pub async fn load(config: Config, authenticator: MessageAuthenticator) -> Result<Self> {
         let store = Arc::new(
             Store::open(&config.db_path)
                 .await
                 .with_context(|| format!("opening database {}", config.db_path.display()))?,
         );
         let members: Arc<dyn MemberProvider> = Arc::new(SqliteMemberProvider::new(store.clone()));
-        let authenticator = MessageAuthenticator::new_system_conf()
-            .context("initialising DNS resolver from system configuration")?;
 
         let policy = load_policy_engine(&config)?;
         info!(

@@ -1,8 +1,7 @@
 //! carriers — a DMARC/ARC-compliant mailing list daemon and CLI.
-
-mod deliver;
-mod smtp;
-mod state;
+//!
+//! The daemon runtime (ingress listener, delivery, shared state) lives in the sibling library
+//! crate `carriers`; this binary is the CLI wrapper around it.
 
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
@@ -12,6 +11,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
+use carriers::smtp;
+use carriers::state::{AppState, load_lists, load_policy_engine};
+use carriers_core::MessageAuthenticator;
 use carriers_core::config::Config;
 use carriers_core::keygen;
 use carriers_core::list::{Algorithm, List};
@@ -19,7 +21,12 @@ use carriers_core::member::{MemberProvider, SqliteMemberProvider};
 use carriers_core::sign::Ingress;
 use carriers_core::store::Store;
 
-use crate::state::{AppState, load_lists, load_policy_engine};
+/// Build the DNS resolver the daemon uses for inbound authentication, from the host's system
+/// configuration (`/etc/resolv.conf`).
+fn system_authenticator() -> Result<MessageAuthenticator> {
+    MessageAuthenticator::new_system_conf()
+        .context("initialising DNS resolver from system configuration")
+}
 
 #[derive(Parser)]
 #[command(
@@ -156,7 +163,7 @@ async fn main() -> Result<()> {
 async fn run(config_path: &Path) -> Result<()> {
     let config = Config::load(config_path)
         .with_context(|| format!("loading config {}", config_path.display()))?;
-    let state = Arc::new(AppState::load(config).await?);
+    let state = Arc::new(AppState::load(config, system_authenticator()?).await?);
     smtp::serve(state).await
 }
 
@@ -331,7 +338,7 @@ async fn moderate(config_path: &Path, cmd: ModerateCommand) -> Result<()> {
             std::io::stdout().write_all(&held.raw)?;
         }
         ModerateCommand::Approve { id } => {
-            let state = Arc::new(AppState::load(config).await?);
+            let state = Arc::new(AppState::load(config, system_authenticator()?).await?);
             let held = state
                 .store
                 .get_held(id)

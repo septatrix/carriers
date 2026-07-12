@@ -1,0 +1,12 @@
+From: Alice <alice@example.com>
+To: dev@lists.example.org
+Subject: Existing message replayed through the harness
+Date: Mon, 06 Jul 2026 10:00:00 +0000
+Message-ID: <replayed-fixture-1@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This is an existing message with no DKIM signature of its own. Replaying it
+through carriers-testkit shows how such a message is distributed and how the
+delivered copy scores at a subscriber's server (its own list DKIM and ARC
+seal are valid, but the author domain cannot pass DMARC via DKIM).
