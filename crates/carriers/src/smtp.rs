@@ -363,7 +363,7 @@ async fn handle_one(
 
     match disposition {
         Disposition::Distribute(prepared) => {
-            let count = deliver(&state.config.smarthost, &prepared).await?;
+            let count = deliver(&state.config.smarthost, list, &prepared).await?;
             Ok(Outcome::Distributed(count))
         }
         Disposition::Held { id } => Ok(Outcome::Held(id)),
@@ -395,7 +395,7 @@ pub async fn distribute_approved(
     .await?;
     match disposition {
         Disposition::Distribute(prepared) => {
-            let count = deliver(&state.config.smarthost, &prepared).await?;
+            let count = deliver(&state.config.smarthost, list, &prepared).await?;
             Ok(Outcome::Distributed(count))
         }
         Disposition::Held { id } => Ok(Outcome::Held(id)),

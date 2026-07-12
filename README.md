@@ -144,6 +144,8 @@ For the **list domain** (e.g. `lists.example.org`):
   `<dkim-selector>._domainkey.<list-domain>`.
 - **ARC**: the TXT record printed by `carriers genkey` at
   `<arc-selector>._domainkey.<list-domain>`.
+- **DKIM2** (only if you've configured `[dkim2]` — see "DKIM2 support"): the TXT record printed
+  by `carriers genkey` at `<dkim2-selector>._domainkey.<list-domain>` (same record shape as DKIM).
 - **SPF**: authorize your smarthost to send for the list domain, e.g.
   `v=spf1 ip4:<smarthost-ip> -all`.
 - **DMARC**: e.g. `v=DMARC1; p=quarantine; rua=mailto:dmarc@lists.example.org`.
@@ -263,8 +265,9 @@ before/after drop-in can also act on it:
 | --- | --- |
 | `vnd.carriers.dmarc_pass` | `yes` / `no` — DMARC passed via an aligned DKIM or SPF identity |
 | `vnd.carriers.dmarc_policy` | `none` / `quarantine` / `reject` — the domain's requested enforcement (no DMARC record published and an explicit `p=none` both read as `none`) |
-| `vnd.carriers.dkim_result` | `pass` / `fail` / `none` / `temperror` / `permerror` — DMARC's DKIM-alignment leg |
+| `vnd.carriers.dkim_result` | `pass` / `fail` / `none` / `temperror` / `permerror` — DMARC's DKIM-alignment leg (a passing, aligned DKIM2 chain counts here too) |
 | `vnd.carriers.spf_result` | same shape as `dkim_result` — DMARC's SPF-alignment leg |
+| `vnd.carriers.dkim2_result` | same shape as `dkim_result` — the raw DKIM2 chain verification result (see "DKIM2 support" below), independent of DMARC alignment |
 
 This is a hard, unconditional invariant — there is no config toggle to disable it.
 
@@ -275,6 +278,27 @@ message can still go out under the list's own aligned identity when its original
 preserved. Nothing built-in requests this yet — it exists as a mechanism for a future feature that
 would otherwise break the author's DKIM (e.g. an opt-in `Subject` prefix or footer), or for a
 custom script that wants it today.
+
+### DKIM2 support
+
+carriers optionally verifies and signs with **DKIM2**
+([draft-ietf-dkim-dkim2-spec](https://datatracker.ietf.org/doc/html/draft-ietf-dkim-dkim2-spec)),
+an emerging IETF successor to classic DKIM and ARC that chains signatures across hops while
+binding the exact SMTP envelope at each one:
+
+- **Verification** always runs on inbound mail (no config needed): if a message carries a DKIM2
+  chain, it's checked alongside classic DKIM/SPF/DMARC, and a passing, aligned chain counts as a
+  DMARC DKIM-alignment pass just like classic DKIM would (see `vnd.carriers.dkim2_result` above).
+- **Signing** is opt-in per list: add a `[dkim2]` key section (same shape as `[dkim]`/`[arc]`) to
+  the list's TOML file. Because DKIM2's envelope binding must exactly match the real delivery
+  envelope — unlike ARC/classic DKIM, which sign once for every recipient — carriers adds the
+  list's DKIM2 chain link **once per recipient**, at actual delivery time, bound to that
+  subscriber's own VERP return path. Everything else (ARC seal, classic DKIM signature, List
+  headers) is still computed once and shared across all copies.
+- The `no-dkim` pseudo-mailbox (see above) withholds the DKIM2 chain link too, not just the
+  classic DKIM signature.
+
+Since the underlying draft isn't yet finalized, DKIM2 signing is off unless explicitly configured.
 
 ### Global policy
 
@@ -397,7 +421,9 @@ the list's own DKIM + ARC are valid), `replay-eml` (an existing message from
 claiming a `p=reject` domain with no valid authentication at all — the built-in DMARC gate must
 reject it at the SMTP level, before it can be signed and relayed with the list's reputation), and
 `dmarc-none-no-signature` (a domain with no DMARC/DKIM/SPF configured — the message is still
-distributed, but the delivered copy must carry no list DKIM signature, only the ARC seal).
+distributed, but the delivered copy must carry no list DKIM signature, only the ARC seal), and
+`dkim2-signing` (a list with `[dkim2]` configured — the delivered copy's DKIM2 chain link must
+verify against the exact per-recipient VERP delivery envelope it was signed with).
 
 For interactive poking, bring the stack up and drive it by hand:
 
@@ -420,10 +446,10 @@ per-domain Sieve `.d` drop-in directories wrapped before/after every list's own 
 unauthenticated mail against an enforcing domain and withholds the list's own DKIM signature
 otherwise (see "DMARC enforcement gate" above), an available From/Reply-To munging mechanism
 (`fileinto "munge-from"`), VERP bounce processing with automatic delivery disabling, loop and
-duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost delivery,
-flat-file lists + SQLite membership (independent subscriber, poster and moderator roles), key
-generation, and an in-process end-to-end test harness (`carriers-testkit`) with mock DNS + a
-scoring SMTP sink.
+duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, opt-in DKIM2
+verification/signing (see "DKIM2 support"), smarthost delivery, flat-file lists + SQLite
+membership (independent subscriber, poster and moderator roles), key generation, and an
+in-process end-to-end test harness (`carriers-testkit`) with mock DNS + a scoring SMTP sink.
 
 Deferred / ideas:
 

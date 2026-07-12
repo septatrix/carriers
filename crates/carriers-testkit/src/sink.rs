@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
+use mail_auth::dkim2::Envelope;
 use mail_auth::spf::verify::SpfParameters;
 use mail_auth::{
-    AuthenticatedMessage, DkimResult, DmarcResult, MessageAuthenticator, SpfResult,
+    AuthenticatedMessage, Dkim2Result, DkimResult, DmarcResult, MessageAuthenticator, SpfResult,
     dmarc::verify::DmarcParameters,
 };
 use smtp_proto::*;
@@ -33,6 +34,9 @@ pub struct Verdict {
     pub dkim_pass_domains: Vec<String>,
     /// The ARC chain validated (`cv=pass`).
     pub arc_pass: bool,
+    /// The DKIM2 chain (draft-ietf-dkim-dkim2-spec) validated against the exact delivery
+    /// envelope (`mail_from`/`rcpt`) — `false` when the message carries no DKIM2 signature.
+    pub dkim2_pass: bool,
     pub spf: SpfResult,
     /// DMARC passed overall (via an aligned, passing DKIM or SPF identity).
     pub dmarc_pass: bool,
@@ -65,12 +69,13 @@ impl Verdict {
             self.dkim_pass_domains.join("+")
         };
         format!(
-            "dmarc={} (dkim-align={}, spf-align={}) | dkim-pass=[{}] | arc={} | spf={:?} | from={} envelope={} rcpt={}",
+            "dmarc={} (dkim-align={}, spf-align={}) | dkim-pass=[{}] | arc={} | dkim2={} | spf={:?} | from={} envelope={} rcpt={}",
             pass(self.dmarc_pass),
             pass(self.dmarc_via_dkim),
             pass(self.dmarc_via_spf),
             dkim,
             pass(self.arc_pass),
+            pass(self.dkim2_pass),
             self.spf,
             self.from_domain,
             self.mail_from,
@@ -274,6 +279,13 @@ async fn score(
 
     let dkim = state.authenticator.verify_dkim(&message).await;
     let arc = state.authenticator.verify_arc(&message).await;
+    let dkim2 = state
+        .authenticator
+        .verify_dkim2(
+            &message,
+            Envelope::new(mail_from, rcpt.iter().map(String::as_str)),
+        )
+        .await;
     let mail_from_domain = domain_of(mail_from);
     let spf = state
         .authenticator
@@ -312,6 +324,7 @@ async fn score(
         from_domain,
         dkim_pass_domains,
         arc_pass: matches!(arc.result(), DkimResult::Pass),
+        dkim2_pass: matches!(dkim2.result(), Dkim2Result::Pass),
         spf: spf.result(),
         dmarc_pass: dmarc_via_dkim || dmarc_via_spf,
         dmarc_via_dkim,
@@ -327,6 +340,7 @@ fn unparseable_verdict(mail_from: &str, rcpt: &[String], err: anyhow::Error) -> 
         from_domain: String::new(),
         dkim_pass_domains: Vec::new(),
         arc_pass: false,
+        dkim2_pass: false,
         spf: SpfResult::None,
         dmarc_pass: false,
         dmarc_via_dkim: false,

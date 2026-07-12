@@ -27,6 +27,13 @@ pub struct Prepared {
     pub return_path_local: String,
     /// List domain, used to build the VERP return path.
     pub list_domain: String,
+    /// The pristine inbound message, present only when the list has a `[dkim2]` key configured
+    /// and no policy tier withheld the list's own signature. DKIM2 binds the exact SMTP envelope,
+    /// which — unlike ARC/classic DKIM — differs per recipient here (VERP), so the list's DKIM2
+    /// chain link can't be added to the shared `message` above; the caller must add one per
+    /// recipient at actual delivery time instead, via
+    /// [`crate::sign::sign_dkim2_for_delivery`], using this as the diff baseline.
+    pub dkim2_original: Option<Vec<u8>>,
 }
 
 /// What the pipeline decided to do with an inbound post.
@@ -132,7 +139,7 @@ pub async fn intake(
     // environment variables — in particular the built-in `dmarc-before.sieve` gate, which rejects
     // outright a message failing DMARC against an enforcing domain policy (see
     // `sign::evaluate_dmarc`), before it can even reach moderation.
-    let verdict = sign::evaluate_dmarc(authenticator, hostname, ingress, raw).await?;
+    let verdict = sign::evaluate_dmarc(authenticator, hostname, list, ingress, raw).await?;
     let auth_env = verdict.env_pairs();
     let auth_env: Vec<(&str, &str)> = auth_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
@@ -279,7 +286,7 @@ pub async fn finalize(
     // Recomputed independently of any earlier `intake` pass (a message may have sat held for
     // moderation, during which the author domain's DNS/policy state could have changed) — see
     // `sign::evaluate_dmarc`.
-    let verdict = sign::evaluate_dmarc(authenticator, hostname, ingress, raw).await?;
+    let verdict = sign::evaluate_dmarc(authenticator, hostname, list, ingress, raw).await?;
     let auth_env = verdict.env_pairs();
     let auth_env: Vec<(&str, &str)> = auth_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
@@ -304,6 +311,11 @@ pub async fn finalize(
     match outcome.decision {
         PolicyDecision::Approve => {
             let recipients = members.recipients(&list.name).await?;
+
+            // The pristine inbound bytes, before any of carriers' own transforms — the diff
+            // baseline for the list's own DKIM2 chain link (see `sign::sign_and_seal`), which
+            // records exactly what carriers changed (munge-from, if any, plus List headers).
+            let original_raw = raw;
 
             // An "after" tier may request From/Reply-To munging (`fileinto "munge-from"`) — an
             // available mechanism, not applied unless a script explicitly asks for it.
@@ -336,6 +348,12 @@ pub async fn finalize(
             )
             .await?;
 
+            // DKIM2's exact envelope-match requirement means its chain link can't be added here
+            // (this `message` is shared, unsigned-per-recipient); the caller adds it per delivery
+            // instead (see `Prepared::dkim2_original`'s docs).
+            let dkim2_original = (!outcome.no_own_dkim && list.dkim2_signer().is_some())
+                .then(|| original_raw.to_vec());
+
             let return_path_local = list
                 .cfg
                 .posting_address
@@ -349,6 +367,7 @@ pub async fn finalize(
                 recipients,
                 return_path_local,
                 list_domain: list.domain.clone(),
+                dkim2_original,
             }))
         }
         PolicyDecision::Moderate => {

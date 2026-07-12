@@ -49,6 +49,8 @@ pub struct HarnessOpts {
     pub author_dmarc_policy: String,
     /// Whether the sink prints a live verdict line per delivered copy.
     pub print_verdicts: bool,
+    /// Configure a `[dkim2]` key for the list (opt-in — see `List::dkim2_signer`).
+    pub list_dkim2: bool,
 }
 
 impl Default for HarnessOpts {
@@ -56,6 +58,7 @@ impl Default for HarnessOpts {
         Self {
             author_dmarc_policy: "reject".to_string(),
             print_verdicts: false,
+            list_dkim2: false,
         }
     }
 }
@@ -86,6 +89,10 @@ impl Harness {
         let (author_key, author_txt) = make_key(&keys_dir, "author.der")?;
         let (list_dkim, list_dkim_txt) = make_key(&keys_dir, "list.dkim.der")?;
         let (list_arc, list_arc_txt) = make_key(&keys_dir, "list.arc.der")?;
+        let list_dkim2 = opts
+            .list_dkim2
+            .then(|| make_key(&keys_dir, "list.dkim2.der"))
+            .transpose()?;
 
         // Assemble the zone file: DKIM public keys, DMARC and SPF for both domains.
         let mut zone = dns::base_zone();
@@ -95,6 +102,11 @@ impl Harness {
             &list_arc_txt,
             &opts.author_dmarc_policy,
         ));
+        if let Some((_, dkim2_txt)) = &list_dkim2 {
+            zone.push_str(&format!(
+                "dkim2._domainkey.{LIST_DOMAIN}. IN TXT \"{dkim2_txt}\"\n"
+            ));
+        }
         let dns = dns::start(&zone).await.context("starting mock DNS")?;
 
         // The sink stands in for subscribers' servers; it scores against the mock DNS.
@@ -113,7 +125,8 @@ impl Harness {
         // Write the daemon config + list definition.
         let db_path = root.join("carriers.db");
         write_config(&root, ingress_port, sink.port(), &db_path, &lists_dir)?;
-        write_list(&lists_dir, &list_dkim, &list_arc)?;
+        let dkim2_key_file = list_dkim2.as_ref().map(|(path, _)| path.as_path());
+        write_list(&lists_dir, &list_dkim, &list_arc, dkim2_key_file)?;
 
         // Seed one subscriber so distribution actually produces a delivered copy.
         seed_subscriber(&db_path).await?;
@@ -215,8 +228,13 @@ fn write_config(
     std::fs::write(root.join("carriers.toml"), toml).context("writing carriers.toml")
 }
 
-fn write_list(lists_dir: &Path, dkim_key: &Path, arc_key: &Path) -> Result<()> {
-    let toml = format!(
+fn write_list(
+    lists_dir: &Path,
+    dkim_key: &Path,
+    arc_key: &Path,
+    dkim2_key: Option<&Path>,
+) -> Result<()> {
+    let mut toml = format!(
         "posting_address = \"{POSTING_ADDRESS}\"\n\
          display_name = \"Dev List\"\n\
          policy = \"open\"\n\
@@ -235,6 +253,16 @@ fn write_list(lists_dir: &Path, dkim_key: &Path, arc_key: &Path) -> Result<()> {
         dkim = dkim_key.display(),
         arc = arc_key.display(),
     );
+    if let Some(dkim2_key) = dkim2_key {
+        toml.push_str(&format!(
+            "\n[dkim2]\n\
+             selector = \"dkim2\"\n\
+             key_file = \"{dkim2}\"\n\
+             algorithm = \"ed25519\"\n\
+             domain = \"{LIST_DOMAIN}\"\n",
+            dkim2 = dkim2_key.display(),
+        ));
+    }
     std::fs::write(lists_dir.join(format!("{LIST_NAME}.toml")), toml).context("writing list toml")
 }
 

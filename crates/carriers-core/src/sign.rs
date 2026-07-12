@@ -3,10 +3,13 @@
 use std::net::IpAddr;
 
 use mail_auth::common::headers::HeaderWriter;
+use mail_auth::dkim2::{Envelope, Hop};
 use mail_auth::dmarc::Policy;
 use mail_auth::dmarc::verify::DmarcParameters;
 use mail_auth::spf::verify::SpfParameters;
-use mail_auth::{AuthenticatedMessage, AuthenticationResults, DmarcResult, MessageAuthenticator};
+use mail_auth::{
+    AuthenticatedMessage, AuthenticationResults, Dkim2Result, DmarcResult, MessageAuthenticator,
+};
 
 use crate::error::{Error, Result};
 use crate::list::List;
@@ -38,10 +41,16 @@ pub struct AuthVerdict {
     /// matching the TODO's "without DMARC/DKIM/SPF configured" case), `"quarantine"`, or
     /// `"reject"`.
     pub dmarc_policy: &'static str,
-    /// DMARC's DKIM-alignment leg: `"pass"`/`"fail"`/`"none"`/`"temperror"`/`"permerror"`.
+    /// DMARC's DKIM-alignment leg: `"pass"`/`"fail"`/`"none"`/`"temperror"`/`"permerror"`. A
+    /// passing, aligned DKIM2 chain (see `dkim2_result`) counts here too — mail-auth folds DKIM2
+    /// into the same DMARC DKIM-alignment leg as classic DKIM.
     pub dkim_result: &'static str,
     /// DMARC's SPF-alignment leg, same shape as `dkim_result`.
     pub spf_result: &'static str,
+    /// The raw DKIM2 chain verification result (draft-ietf-dkim-dkim2-spec), independent of DMARC
+    /// alignment: `"pass"`/`"fail"`/`"none"`/`"temperror"`/`"permerror"`. `"none"` when the
+    /// message carries no DKIM2 signature at all.
+    pub dkim2_result: &'static str,
 }
 
 impl AuthVerdict {
@@ -55,16 +64,21 @@ impl AuthVerdict {
             ("vnd.carriers.dmarc_policy", self.dmarc_policy.to_string()),
             ("vnd.carriers.dkim_result", self.dkim_result.to_string()),
             ("vnd.carriers.spf_result", self.spf_result.to_string()),
+            ("vnd.carriers.dkim2_result", self.dkim2_result.to_string()),
         ]
     }
 }
 
-/// Verify the inbound message's DKIM/SPF/DMARC, reduced to the facts Sieve policy scripts need
-/// to decide whether it may be distributed, and whether it may carry the list's own DKIM
+/// Verify the inbound message's DKIM/DKIM2/SPF/DMARC, reduced to the facts Sieve policy scripts
+/// need to decide whether it may be distributed, and whether it may carry the list's own DKIM
 /// signature. See [`AuthVerdict`].
+///
+/// `list` supplies the envelope (`ingress.mail_from` / the list's own posting address) DKIM2
+/// verification binds to — the same envelope carriers itself observed on ingress.
 pub async fn evaluate_dmarc(
     authenticator: &MessageAuthenticator,
     hostname: &str,
+    list: &List,
     ingress: &Ingress,
     raw: &[u8],
 ) -> Result<AuthVerdict> {
@@ -80,14 +94,20 @@ pub async fn evaluate_dmarc(
             &ingress.mail_from,
         ))
         .await;
+    let dkim2 = authenticator
+        .verify_dkim2(
+            &message,
+            Envelope::new(
+                ingress.mail_from.as_str(),
+                [list.cfg.posting_address.as_str()],
+            ),
+        )
+        .await;
     let mail_from_domain = domain_of(&ingress.mail_from);
     let dmarc = authenticator
-        .verify_dmarc(DmarcParameters::new(
-            &message,
-            &dkim,
-            mail_from_domain,
-            &spf,
-        ))
+        .verify_dmarc(
+            DmarcParameters::new(&message, &dkim, mail_from_domain, &spf).with_dkim2_output(&dkim2),
+        )
         .await;
 
     let dkim_result = dmarc_result_str(dmarc.dkim_result());
@@ -101,6 +121,7 @@ pub async fn evaluate_dmarc(
         },
         dkim_result,
         spf_result,
+        dkim2_result: dkim2_result_str(dkim2.result()),
     })
 }
 
@@ -111,6 +132,16 @@ fn dmarc_result_str(result: &DmarcResult) -> &'static str {
         DmarcResult::TempError(_) => "temperror",
         DmarcResult::PermError(_) => "permerror",
         DmarcResult::None => "none",
+    }
+}
+
+fn dkim2_result_str(result: &Dkim2Result) -> &'static str {
+    match result {
+        Dkim2Result::Pass => "pass",
+        Dkim2Result::Fail(_) => "fail",
+        Dkim2Result::TempError(_) => "temperror",
+        Dkim2Result::PermError(_) => "permerror",
+        Dkim2Result::None => "none",
     }
 }
 
@@ -128,10 +159,17 @@ fn domain_of(address: &str) -> &str {
 /// original bytes are never rewritten, the author's DKIM signature survives and DMARC passes
 /// at the receiver via DKIM alignment; the ARC seal is the backstop for hops that break it.
 ///
+/// This does *not* add a DKIM2 chain link, even if the list has one configured: DKIM2 binds the
+/// exact SMTP envelope (`mail_from`/`rcpt_to`), which — unlike ARC/DKIM — varies per recipient
+/// here (VERP gives each subscriber a distinct return path), so a single shared signature computed
+/// here could only ever exactly match one recipient's envelope. See [`sign_dkim2_for_delivery`],
+/// called once per recipient at actual delivery time instead.
+///
 /// `skip_own_dkim` withholds the list's own `DKIM-Signature` — set when the Sieve "after" policy
 /// chain decided this message must not be lent the list's reputation (see
-/// `builtin_policies/dmarc-after.sieve` and [`AuthVerdict`]). The ARC seal is added either way: it
-/// is an honest record of what was observed, not a reputation grant.
+/// `builtin_policies/dmarc-after.sieve` and [`AuthVerdict`]); [`sign_dkim2_for_delivery`] is not
+/// called at all in that case either. The ARC seal is added either way: it is an honest record of
+/// what was observed, not a reputation grant.
 pub async fn sign_and_seal(
     authenticator: &MessageAuthenticator,
     list: &List,
@@ -179,5 +217,39 @@ pub async fn sign_and_seal(
         out.extend_from_slice(signature.to_header().as_bytes());
     }
     out.extend_from_slice(augmented);
+    Ok(out)
+}
+
+/// Add the list's own DKIM2 chain link for one specific outbound delivery, bound to the exact
+/// SMTP envelope (`mail_from`/`rcpt_to`) that delivery will use. Unlike ARC/classic DKIM, DKIM2
+/// verification requires an *exact* match against the real envelope — see [`sign_and_seal`]'s
+/// docs for why that means this must run once per recipient rather than once per message.
+///
+/// `original` is the pristine inbound message, before any of carriers' own transforms (List
+/// headers, munge-from) — the diff baseline for the chain link's recipe, so it records exactly
+/// what carriers changed. `message` is the fully ARC-sealed/DKIM-signed message produced by
+/// [`sign_and_seal`] (identical for every recipient — only the envelope differs here). Returns
+/// `message` unchanged if the list has no `[dkim2]` key configured.
+///
+/// No prior verification of the message's existing DKIM2 chain is needed — the next `i=` is
+/// derived from whatever chain `message` already carries (0, in carriers' case, since it never
+/// arrives with one).
+pub fn sign_dkim2_for_delivery(
+    list: &List,
+    original: &[u8],
+    message: &[u8],
+    mail_from: &str,
+    rcpt_to: &str,
+) -> Result<Vec<u8>> {
+    let Some(dkim2_signer) = list.dkim2_signer() else {
+        return Ok(message.to_vec());
+    };
+    let signed = dkim2_signer
+        .sign_revised(original, message, Hop::real(mail_from, [rcpt_to]))
+        .map_err(|e| Error::Auth(format!("DKIM2 signing failed: {e}")))?;
+
+    let mut out = Vec::with_capacity(message.len() + 256);
+    out.extend_from_slice(signed.to_header().as_bytes());
+    out.extend_from_slice(message);
     Ok(out)
 }
