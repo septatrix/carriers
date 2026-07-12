@@ -1,10 +1,16 @@
-//! DKIM-safe `List-*` header injection.
+//! DKIM-safe `List-*` header injection, plus the From/Reply-To munging mechanism.
 //!
-//! The only transformation carriers performs is *adding* `List-*` headers (RFC 2369 + RFC 8058);
-//! the body and existing headers are never touched, so the author's original DKIM signature
-//! stays valid. The mechanical insertion is done by the built-in `list-headers.sieve` script
-//! (via `addheader`, which prepends); this module only computes the header *values* from the
-//! list config and exposes them to that script as environment variables.
+//! The default transformation carriers performs is *adding* `List-*` headers (RFC 2369 + RFC
+//! 8058); the body and existing headers are never touched, so the author's original DKIM
+//! signature stays valid. The mechanical insertion is done by the built-in `list-headers.sieve`
+//! script (via `addheader`, which prepends); this module only computes the header *values* from
+//! the list config and exposes them to that script as environment variables.
+//!
+//! [`munge_from_env`] backs the separate, DKIM-*breaking* `munge-from.sieve` mechanism (mailman3's
+//! `munge_from` DMARC mitigation): rewriting `From`/`Reply-To` to the list's own identity. This is
+//! deliberately never applied by default — see `builtin_policies/munge-from.sieve`.
+
+use mail_parser::MessageParser;
 
 use crate::list::List;
 
@@ -56,6 +62,52 @@ pub fn list_header_env(list: &List) -> Vec<(&'static str, String)> {
                 .as_ref()
                 .map(|o| format!("<mailto:{o}>"))
                 .unwrap_or_default(),
+        ),
+    ]
+}
+
+/// Environment variable names carrying the munged `From`/`Reply-To` values to `munge-from.sieve`.
+pub const MUNGE_FROM: &str = "vnd.carriers.munge_from";
+pub const REPLY_TO: &str = "vnd.carriers.reply_to";
+
+/// Compute the `(env-var, value)` pairs for [`crate::policy::PolicyEngine::apply_munge_from`]:
+/// a `From` value naming the original sender under the list's own posting address (mailman3-style,
+/// `"<original name or address> via <list display name>" <list posting address>`), and a
+/// `Reply-To` pointing back at the original sender's address. If `raw`'s `From` can't be parsed,
+/// both values fall back to the list's own posting address (munging still succeeds, just with
+/// nothing to attribute to).
+pub fn munge_from_env(list: &List, raw: &[u8]) -> Vec<(&'static str, String)> {
+    let posting_address = &list.cfg.posting_address;
+    let list_description = list
+        .cfg
+        .display_name
+        .clone()
+        .unwrap_or_else(|| list.name.clone());
+
+    let (original_name, original_address) = MessageParser::default()
+        .parse(raw)
+        .and_then(|m| m.from().and_then(|addr| addr.first()).cloned())
+        .map(|addr| {
+            (
+                addr.name().map(str::to_string),
+                addr.address().map(str::to_string),
+            )
+        })
+        .unwrap_or_default();
+
+    let attribution = original_name
+        .filter(|n| !n.is_empty())
+        .or_else(|| original_address.clone())
+        .unwrap_or_else(|| posting_address.clone());
+
+    vec![
+        (
+            MUNGE_FROM,
+            format!("\"{attribution} via {list_description}\" <{posting_address}>"),
+        ),
+        (
+            REPLY_TO,
+            original_address.unwrap_or_else(|| posting_address.clone()),
         ),
     ]
 }

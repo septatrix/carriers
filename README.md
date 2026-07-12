@@ -230,6 +230,44 @@ built-in policies):
 Loop and duplicate detection run ahead of the policy chain on every message; the header injection
 runs at the very end, just before signing, on a message that is going out.
 
+### DMARC enforcement gate
+
+carriers must never act as an "open relay" for reputation: adding its own valid, aligned DKIM
+signature to a message that is itself unauthenticated would let anyone launder a spoofed identity
+through the list's sending reputation. Two more built-in scripts close this:
+
+- **`dmarc-before.sieve`** runs first in the "before" chain (ahead of even the global-before
+  drop-ins), and **rejects outright** a message that fails DMARC against a domain that requests
+  enforcement (`p=quarantine`/`p=reject`) — before it can even reach moderation.
+- **`dmarc-after.sieve`** runs first in the "after" chain. It re-checks the same condition
+  defensively (a message can sit held for moderation while the author domain's DNS/policy state
+  changes), and for a message that still fails DMARC but whose domain does *not* request
+  enforcement (no DMARC record published at all, or an explicit `p=none`), it files the message
+  into the `no-dkim` pseudo-mailbox: the message is still distributed, but **never carries the
+  list's own `DKIM-Signature`** — only the ARC seal, which honestly records what was observed
+  rather than lending the message the list's reputation.
+
+Both scripts decide from the same DMARC/DKIM/SPF verdict, computed once per evaluation and exposed
+to *every* Sieve tier (not just these two built-ins) as environment variables, so a custom
+before/after drop-in can also act on it:
+
+| Variable | Values |
+| --- | --- |
+| `vnd.carriers.dmarc_pass` | `yes` / `no` — DMARC passed via an aligned DKIM or SPF identity |
+| `vnd.carriers.dmarc_policy` | `none` / `quarantine` / `reject` — the domain's requested enforcement (no DMARC record published and an explicit `p=none` both read as `none`) |
+| `vnd.carriers.dkim_result` | `pass` / `fail` / `none` / `temperror` / `permerror` — DMARC's DKIM-alignment leg |
+| `vnd.carriers.spf_result` | same shape as `dkim_result` — DMARC's SPF-alignment leg |
+
+This is a hard, unconditional invariant — there is no config toggle to disable it.
+
+**From/Reply-To munging.** A `munge-from` pseudo-mailbox is also available (mailman3's
+`munge_from` DMARC mitigation): filing a message into it rewrites `From` to the list's own posting
+address (embedding the original sender's name) and `Reply-To` back to the original sender, so a
+message can still go out under the list's own aligned identity when its original one can never be
+preserved. Nothing built-in requests this yet — it exists as a mechanism for a future feature that
+would otherwise break the author's DKIM (e.g. an opt-in `Subject` prefix or footer), or for a
+custom script that wants it today.
+
 ### Global policy
 
 Alongside each list's own `policy`, further optional Sieve scripts can run wrapped around it,
@@ -346,8 +384,12 @@ $ cargo run -p carriers-testkit -- scenario --all
 The bundled scenarios are `author-signed-preject` (a validly author-signed post from a `p=reject`
 domain — the core guarantee: the author's DKIM survives and DMARC passes via DKIM alignment at the
 subscriber), `no-dkim` (an unsigned post — the author domain can *not* pass DMARC via DKIM, only
-the list's own DKIM + ARC are valid), and `replay-eml` (an existing message from
-`examples/testkit/messages/` replayed verbatim).
+the list's own DKIM + ARC are valid), `replay-eml` (an existing message from
+`examples/testkit/messages/` replayed verbatim), `dmarc-reject-spoofed` (a spoofed identity
+claiming a `p=reject` domain with no valid authentication at all — the built-in DMARC gate must
+reject it at the SMTP level, before it can be signed and relayed with the list's reputation), and
+`dmarc-none-no-signature` (a domain with no DMARC/DKIM/SPF configured — the message is still
+distributed, but the delivered copy must carry no list DKIM signature, only the ARC seal).
 
 For interactive poking, bring the stack up and drive it by hand:
 
@@ -366,11 +408,14 @@ directory; nothing leaves the machine.
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
 open / subscribers / posters / moderated modes, or a Sieve script), optional instance-wide and
 per-domain Sieve `.d` drop-in directories wrapped before/after every list's own policy, on-disk
-`.eml` archiving (`fileinto :copy "archive"`), VERP bounce processing with automatic delivery
-disabling, loop and duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing,
-smarthost delivery, flat-file lists + SQLite membership (independent subscriber, poster and
-moderator roles), key generation, and an in-process end-to-end test harness (`carriers-testkit`)
-with mock DNS + a scoring SMTP sink.
+`.eml` archiving (`fileinto :copy "archive"`), a built-in DMARC enforcement gate that rejects
+unauthenticated mail against an enforcing domain and withholds the list's own DKIM signature
+otherwise (see "DMARC enforcement gate" above), an available From/Reply-To munging mechanism
+(`fileinto "munge-from"`), VERP bounce processing with automatic delivery disabling, loop and
+duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost delivery,
+flat-file lists + SQLite membership (independent subscriber, poster and moderator roles), key
+generation, and an in-process end-to-end test harness (`carriers-testkit`) with mock DNS + a
+scoring SMTP sink.
 
 Deferred / ideas:
 
@@ -380,8 +425,11 @@ Deferred / ideas:
 - message archiving: on-disk `.eml` archiving is implemented (`fileinto :copy "archive"` writes
   each post under a per-list subdirectory — see "Posting policy and moderation"). Still open: a
   search index (full-text over headers/body) for retrieval, and a web archive layered on top
-- opt-in `Subject`-prefix / footer support
-- richer policy context (spam/DKIM results, message size) exposed to scripts
+- opt-in `Subject`-prefix / footer support — for cases where it would break the author's DKIM,
+  the `munge-from` mechanism (see "DMARC enforcement gate") exists precisely to let a message
+  still go out under the list's own aligned identity instead
+- richer policy context exposed to scripts: DMARC/DKIM/SPF results are now exposed (see "DMARC
+  enforcement gate"); still open: spam-filter results, message size
 - custom Sieve functions registered via the runtime builder's `with_functions`, so policy
   scripts can call carriers-provided helpers — e.g. stripping an attachment, checking a value
   against an external service, or rewriting a header
@@ -409,9 +457,6 @@ Deferred / ideas:
   works uniformly against SQLite today and a future pull-based provider without special-casing
 - `carriers genkey` should output zone file and not some binary jumbled mess
 - Support libeconf/UAPI style configuration (merging, overwriting, drop-ins etc)
-- Ensure we do not provide an "open relay" where posters can send unauthenticated (no DMARC, or failure) messages which we then sign with our reputation.
-  This means checking incoming DMARC/SPF/DKIM results and rejecting DMARC failures of incoming mails.
-  For mails without DMARC/DKIM/SPF configured we similarly must never add our own DKIM signature!
 - Instead of manually specifying the drop-in directories for per-domain policies, just build a reverse domain
   from the directory paths, e.g. `policies/com/example/lists.d/` for `lists.example.com`.
   This is more intuitive and allows for a more natural directory structure, e.g. `policies/com/example/global-before.d/` for

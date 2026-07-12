@@ -34,6 +34,15 @@ pub const AUTHOR_DOMAIN: &str = "example.com";
 pub const AUTHOR_SELECTOR: &str = "auth";
 pub const SUBSCRIBER: &str = "bob@subscriber.example";
 
+/// A third-party domain publishing a strict, enforcing DMARC policy but authorizing no sender —
+/// standing in for an impersonated identity with no valid authentication of its own. Always
+/// present in the zone (unconditionally on `author_dmarc_policy`), for the `dmarc-reject-spoofed`
+/// scenario.
+pub const SPOOFED_STRICT_DOMAIN: &str = "spoofed-strict.example";
+/// A domain with no DMARC/SPF record at all (deliberately absent from the zone) — the "nothing
+/// configured" case, for the `dmarc-none-no-signature` scenario.
+pub const UNCONFIGURED_DOMAIN: &str = "unconfigured.example";
+
 /// Options that vary between scenarios.
 pub struct HarnessOpts {
     /// The author domain's published DMARC policy (`p=`), e.g. `reject` or `none`.
@@ -173,7 +182,11 @@ fn zone_records(
          {AUTHOR_DOMAIN}. IN TXT \"v=spf1 ip4:127.0.0.1 -all\"\n\
          {LIST_DOMAIN}. IN TXT \"v=spf1 ip4:127.0.0.1 -all\"\n\
          {AUTHOR_DOMAIN}. IN A 127.0.0.1\n\
-         {LIST_DOMAIN}. IN A 127.0.0.1\n",
+         {LIST_DOMAIN}. IN A 127.0.0.1\n\
+         _dmarc.{SPOOFED_STRICT_DOMAIN}. IN TXT \"v=DMARC1; p=reject; adkim=r; aspf=r\"\n\
+         {SPOOFED_STRICT_DOMAIN}. IN TXT \"v=spf1 -all\"\n",
+        // `UNCONFIGURED_DOMAIN` is deliberately absent from this zone: no DMARC or SPF record at
+        // all, the "nothing configured" case.
     )
 }
 

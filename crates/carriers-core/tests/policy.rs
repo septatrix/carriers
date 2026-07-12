@@ -64,7 +64,15 @@ async fn sieve_policy_decides_approve_moderate_discard_reject() {
     let sets = sets();
     let eval = async |from: &str| {
         engine
-            .evaluate("corporate", "dev", LIST_ID, from, &message(from), &sets)
+            .evaluate(
+                "corporate",
+                "dev",
+                LIST_ID,
+                from,
+                &message(from),
+                &sets,
+                &[],
+            )
             .await
             .unwrap()
             .decision
@@ -96,7 +104,8 @@ async fn empty_script_approves_by_default() {
                 LIST_ID,
                 "anyone@example.com",
                 &message("anyone@example.com"),
-                &MembershipSets::default()
+                &MembershipSets::default(),
+                &[]
             )
             .await
             .unwrap()
@@ -118,7 +127,7 @@ async fn builtin_policies_behave_like_the_posting_modes() {
     let sets = sets(); // subscribers: alice; posters: bot
     let eval = async |policy: &str, from: &str| {
         engine
-            .evaluate(policy, "dev", LIST_ID, from, &message(from), &sets)
+            .evaluate(policy, "dev", LIST_ID, from, &message(from), &sets, &[])
             .await
             .unwrap()
             .decision
@@ -265,6 +274,19 @@ async fn check_duplicate_is_never_a_duplicate_without_a_store() {
 /// The "before" half of the chain (global-before -> domain-before -> the list policy), decided
 /// at intake (helper to keep the tier-composition tests readable).
 async fn eval_before(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyDecision {
+    eval_before_outcome(engine, domain, from, &[])
+        .await
+        .decision
+}
+
+/// Like [`eval_before`], but returns the full [`PolicyOutcome`] and accepts extra environment
+/// variables (e.g. the `vnd.carriers.dmarc_*` facts) for tests of the built-in DMARC gate.
+async fn eval_before_outcome(
+    engine: &PolicyEngine,
+    domain: &str,
+    from: &str,
+    extra_env: &[(&str, &str)],
+) -> PolicyOutcome {
     engine
         .evaluate_before(
             "corporate",
@@ -274,19 +296,37 @@ async fn eval_before(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyD
             from,
             &message(from),
             &sets(),
+            extra_env,
         )
         .await
         .unwrap()
-        .decision
 }
 
 /// The "after" half of the chain (domain-after -> global-after), decided at distribution time.
 async fn eval_after(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyDecision {
+    eval_after_outcome(engine, domain, from, &[]).await.decision
+}
+
+/// Like [`eval_after`], but returns the full [`PolicyOutcome`] and accepts extra environment
+/// variables.
+async fn eval_after_outcome(
+    engine: &PolicyEngine,
+    domain: &str,
+    from: &str,
+    extra_env: &[(&str, &str)],
+) -> PolicyOutcome {
     engine
-        .evaluate_after("dev", LIST_ID, domain, from, &message(from), &sets())
+        .evaluate_after(
+            "dev",
+            LIST_ID,
+            domain,
+            from,
+            &message(from),
+            &sets(),
+            extra_env,
+        )
         .await
         .unwrap()
-        .decision
 }
 
 #[tokio::test]
@@ -494,40 +534,20 @@ async fn fileinto_copy_archive_requests_an_archive_but_keeps_the_decision() {
         .unwrap();
 
     // alice (a subscriber) is approved by the list policy, and archiving is requested alongside.
-    let out = engine
-        .evaluate_before(
-            "corporate",
-            "dev",
-            LIST_ID,
-            "lists.example.org",
-            "alice@example.com",
-            &message("alice@example.com"),
-            &sets(),
-        )
-        .await
-        .unwrap();
+    let out = eval_before_outcome(&engine, "lists.example.org", "alice@example.com", &[]).await;
     assert_eq!(
         out,
         PolicyOutcome {
             decision: PolicyDecision::Approve,
             archive: true,
+            no_own_dkim: false,
+            munge_from: false,
         }
     );
 
     // The archive flag rides along with an authoritative decision too: mallory is rejected by the
     // list policy, but the before-script still asked to archive her post.
-    let out = engine
-        .evaluate_before(
-            "corporate",
-            "dev",
-            LIST_ID,
-            "lists.example.org",
-            "mallory@evil.example",
-            &message("mallory@evil.example"),
-            &sets(),
-        )
-        .await
-        .unwrap();
+    let out = eval_before_outcome(&engine, "lists.example.org", "mallory@evil.example", &[]).await;
     assert_eq!(
         out.decision,
         PolicyDecision::Reject {
@@ -543,18 +563,7 @@ async fn no_archive_when_no_tier_files_into_archive() {
     write_policy(dir.path(), "corporate", POLICY);
     let engine = PolicyEngine::load(dir.path()).unwrap();
 
-    let out = engine
-        .evaluate_before(
-            "corporate",
-            "dev",
-            LIST_ID,
-            "lists.example.org",
-            "alice@example.com",
-            &message("alice@example.com"),
-            &sets(),
-        )
-        .await
-        .unwrap();
+    let out = eval_before_outcome(&engine, "lists.example.org", "alice@example.com", &[]).await;
     assert!(!out.archive);
 }
 
@@ -572,22 +581,14 @@ async fn archive_can_be_requested_by_the_after_tier() {
         .with_global_after(&after)
         .unwrap();
 
-    let out = engine
-        .evaluate_after(
-            "dev",
-            LIST_ID,
-            "lists.example.org",
-            "alice@example.com",
-            &message("alice@example.com"),
-            &sets(),
-        )
-        .await
-        .unwrap();
+    let out = eval_after_outcome(&engine, "lists.example.org", "alice@example.com", &[]).await;
     assert_eq!(
         out,
         PolicyOutcome {
             decision: PolicyDecision::Approve,
             archive: true,
+            no_own_dkim: false,
+            munge_from: false,
         }
     );
 }
@@ -614,23 +615,14 @@ async fn before_dropins_run_in_filename_order_and_compose() {
         .with_global_before(&before)
         .unwrap();
 
-    let out = engine
-        .evaluate_before(
-            "corporate",
-            "dev",
-            LIST_ID,
-            "lists.example.org",
-            "x@example.com",
-            &message("x@example.com"),
-            &sets(),
-        )
-        .await
-        .unwrap();
+    let out = eval_before_outcome(&engine, "lists.example.org", "x@example.com", &[]).await;
     assert_eq!(
         out,
         PolicyOutcome {
             decision: PolicyDecision::Moderate,
             archive: true,
+            no_own_dkim: false,
+            munge_from: false,
         }
     );
 }
@@ -654,22 +646,122 @@ async fn an_earlier_dropin_reject_short_circuits_later_dropins() {
         .with_global_before(&before)
         .unwrap();
 
-    let out = engine
-        .evaluate_before(
-            "corporate",
-            "dev",
-            LIST_ID,
-            "lists.example.org",
-            "x@example.com",
-            &message("x@example.com"),
-            &sets(),
-        )
-        .await
-        .unwrap();
+    let out = eval_before_outcome(&engine, "lists.example.org", "x@example.com", &[]).await;
     assert_eq!(
         out.decision,
         PolicyDecision::Reject {
             reason: "first".to_string()
         }
     );
+}
+
+/// `(vnd.carriers.dmarc_pass, vnd.carriers.dmarc_policy)` env pairs, standing in for a computed
+/// [`carriers_core::sign::AuthVerdict`] — these tests exercise the gate scripts and policy.rs
+/// wiring directly, without a real `MessageAuthenticator`/DNS (that correctness is covered by
+/// `sign.rs` and the end-to-end `carriers-testkit` scenarios).
+fn dmarc_env(pass: bool, policy: &str) -> [(&str, &str); 2] {
+    [
+        ("vnd.carriers.dmarc_pass", if pass { "yes" } else { "no" }),
+        ("vnd.carriers.dmarc_policy", policy),
+    ]
+}
+
+#[tokio::test]
+async fn dmarc_before_gate_rejects_an_enforced_failure_ahead_of_the_list_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let engine = PolicyEngine::load(dir.path()).unwrap();
+
+    // alice is a subscriber — POLICY would approve her outright — but the built-in DMARC gate
+    // runs first and rejects, so the list policy never gets a say.
+    let env = dmarc_env(false, "reject");
+    let out = eval_before_outcome(&engine, "lists.example.org", "alice@example.com", &env).await;
+    assert_eq!(
+        out.decision,
+        PolicyDecision::Reject {
+            reason: "This message failed DMARC and its domain requests enforcement on failure."
+                .to_string()
+        }
+    );
+}
+
+#[tokio::test]
+async fn dmarc_before_gate_lets_an_unenforced_failure_reach_the_list_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let engine = PolicyEngine::load(dir.path()).unwrap();
+
+    // No DMARC record published (or an explicit p=none) collapses to "none": the gate has no
+    // opinion, so the list policy (which approves alice, a subscriber) still decides.
+    let env = dmarc_env(false, "none");
+    let out = eval_before_outcome(&engine, "lists.example.org", "alice@example.com", &env).await;
+    assert_eq!(out.decision, PolicyDecision::Approve);
+}
+
+#[tokio::test]
+async fn dmarc_after_gate_withholds_the_list_dkim_signature_for_an_unenforced_failure() {
+    let engine = PolicyEngine::new().unwrap();
+
+    let env = dmarc_env(false, "none");
+    let out = eval_after_outcome(&engine, "lists.example.org", "alice@example.com", &env).await;
+    assert_eq!(out.decision, PolicyDecision::Approve);
+    assert!(
+        out.no_own_dkim,
+        "an unenforced DMARC failure must withhold the list's own DKIM signature"
+    );
+}
+
+#[tokio::test]
+async fn dmarc_after_gate_rejects_an_enforced_failure_defensively() {
+    // Even a message that made it past the "before" gate (e.g. the author domain's DNS/policy
+    // changed while a message sat held for moderation) must not slip through at the last step.
+    let engine = PolicyEngine::new().unwrap();
+
+    let env = dmarc_env(false, "quarantine");
+    let out = eval_after_outcome(&engine, "lists.example.org", "alice@example.com", &env).await;
+    assert_eq!(
+        out.decision,
+        PolicyDecision::Reject {
+            reason: "This message failed DMARC and its domain requests enforcement on failure."
+                .to_string()
+        }
+    );
+}
+
+#[tokio::test]
+async fn dmarc_pass_leaves_the_after_outcome_unaffected() {
+    let engine = PolicyEngine::new().unwrap();
+
+    // Passing DMARC keeps the list's own signature even against a domain that requests strict
+    // enforcement — the gate only acts on a failure, never on a pass.
+    let env = dmarc_env(true, "reject");
+    let out = eval_after_outcome(&engine, "lists.example.org", "alice@example.com", &env).await;
+    assert_eq!(out.decision, PolicyDecision::Approve);
+    assert!(!out.no_own_dkim);
+}
+
+#[tokio::test]
+async fn apply_munge_from_rewrites_from_and_reply_to() {
+    let engine = PolicyEngine::new().unwrap();
+    let raw = b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\nSubject: hi\r\n\r\nbody\r\n";
+
+    let munge_env = [
+        (
+            "vnd.carriers.munge_from",
+            "\"Alice via Dev List\" <dev@lists.example.org>",
+        ),
+        ("vnd.carriers.reply_to", "alice@example.com"),
+    ];
+    let out = engine
+        .apply_munge_from("dev", LIST_ID, &munge_env, raw)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(out.contains("From: \"Alice via Dev List\" <dev@lists.example.org>"));
+    assert!(out.contains("Reply-To: alice@example.com"));
+    assert!(!out.contains("Alice <alice@example.com>"));
+    // The body and other headers survive untouched.
+    assert!(out.contains("To: dev@lists.example.org"));
+    assert!(out.contains("body"));
 }

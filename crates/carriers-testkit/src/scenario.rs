@@ -9,7 +9,13 @@ use crate::sender::{self, Draft};
 use crate::sink::Verdict;
 
 /// Every built-in scenario name, in a natural running order.
-pub const ALL: &[&str] = &["author-signed-preject", "no-dkim", "replay-eml"];
+pub const ALL: &[&str] = &[
+    "author-signed-preject",
+    "no-dkim",
+    "replay-eml",
+    "dmarc-reject-spoofed",
+    "dmarc-none-no-signature",
+];
 
 /// Run one scenario by name; returns whether every assertion held. Details are printed.
 pub async fn run(name: &str) -> Result<bool> {
@@ -17,6 +23,8 @@ pub async fn run(name: &str) -> Result<bool> {
         "author-signed-preject" => author_signed_preject().await,
         "no-dkim" => no_dkim().await,
         "replay-eml" => replay_eml().await,
+        "dmarc-reject-spoofed" => dmarc_reject_spoofed().await,
+        "dmarc-none-no-signature" => dmarc_none_no_signature().await,
         other => bail!("unknown scenario `{other}` (known: {})", ALL.join(", ")),
     }
 }
@@ -113,6 +121,85 @@ async fn replay_eml() -> Result<bool> {
     )
 }
 
+/// A spoofed identity: `From:` claims a third-party domain that publishes a strict, enforcing
+/// DMARC policy (`p=reject`) but authorizes no sender at all — no valid DKIM signature, no SPF
+/// authorization for the injecting IP. This is exactly the "open relay" risk the DMARC gate
+/// exists for: without it, carriers would happily add its own valid, aligned DKIM signature to
+/// this message and relay it, laundering an unauthenticated, impersonated identity with the
+/// list's own reputation. The `dmarc-before` gate must reject it outright, at the SMTP level,
+/// before it ever reaches moderation or signing.
+async fn dmarc_reject_spoofed() -> Result<bool> {
+    let h = Harness::start(HarnessOpts::default()).await?;
+    let before = h.sink.verdicts().await.len();
+
+    let from = format!("mallory@{}", harness::SPOOFED_STRICT_DOMAIN);
+    let draft = Draft {
+        from: from.clone(),
+        to: harness::POSTING_ADDRESS.to_string(),
+        subject: "Urgent: impersonated identity".to_string(),
+        body: "This message claims a strict domain's identity with no valid authentication.\n"
+            .to_string(),
+        extra_headers: Vec::new(),
+    };
+    let raw = sender::build(&draft);
+    let result = sender::inject(&h.ingress_host, h.ingress_port, &from, &draft.to, &raw).await;
+    let after = h.sink.verdicts().await.len();
+
+    println!("\n=== scenario: dmarc-reject-spoofed ===");
+    let rejected = result.is_err();
+    let no_copy_delivered = after == before;
+    println!(
+        "  submission: {}",
+        result.as_ref().err().map_or_else(
+            || "accepted (unexpected)".to_string(),
+            |e| format!("rejected ({e})")
+        )
+    );
+    let mut all_ok = true;
+    for (label, ok) in [
+        ("SMTP submission rejected", rejected),
+        ("no copy reached the sink", no_copy_delivered),
+    ] {
+        println!("  [{}] {label}", if ok { "OK  " } else { "FAIL" });
+        all_ok &= ok;
+    }
+    println!("  result: {}", if all_ok { "PASS" } else { "FAIL" });
+    Ok(all_ok)
+}
+
+/// A domain with no DMARC or SPF record configured at all (not even `p=none` — the record is
+/// simply absent), and no author DKIM signature. carriers has nothing to authenticate here, so
+/// per the "must never sign unauthenticated mail with our own reputation" invariant, the message
+/// is still distributed (the domain isn't asking for enforcement), but must not carry the list's
+/// own DKIM signature — only the honest ARC seal.
+async fn dmarc_none_no_signature() -> Result<bool> {
+    let h = Harness::start(HarnessOpts::default()).await?;
+
+    let from = format!("casey@{}", harness::UNCONFIGURED_DOMAIN);
+    let draft = Draft {
+        from: from.clone(),
+        to: harness::POSTING_ADDRESS.to_string(),
+        subject: "No DMARC configured".to_string(),
+        body: "This domain has no DMARC, DKIM or SPF record at all.\n".to_string(),
+        extra_headers: Vec::new(),
+    };
+    let raw = sender::build(&draft);
+    let verdict = send_and_score_from(&h, &from, &draft.to, &raw).await?;
+
+    report(
+        "dmarc-none-no-signature",
+        &verdict,
+        &[
+            check(
+                "list DKIM withheld",
+                verdict.dkim_pass_for(harness::LIST_DOMAIN),
+                false,
+            ),
+            check("ARC cv=pass", verdict.arc_pass, true),
+        ],
+    )
+}
+
 fn draft(subject: &str) -> Draft {
     Draft {
         from: harness::AUTHOR_FROM.to_string(),
@@ -123,17 +210,22 @@ fn draft(subject: &str) -> Draft {
     }
 }
 
-/// Inject `raw` and return the verdict the sink scored for the resulting delivered copy.
+/// Inject `raw` as the fixed harness author and return the verdict the sink scored for the
+/// resulting delivered copy.
 async fn send_and_score(h: &Harness, raw: &[u8]) -> Result<Verdict> {
+    send_and_score_from(h, harness::AUTHOR_FROM, harness::POSTING_ADDRESS, raw).await
+}
+
+/// Inject `raw` with an arbitrary envelope `mail_from`/`to` and return the verdict the sink
+/// scored for the resulting delivered copy.
+async fn send_and_score_from(
+    h: &Harness,
+    mail_from: &str,
+    to: &str,
+    raw: &[u8],
+) -> Result<Verdict> {
     let before = h.sink.verdicts().await.len();
-    sender::inject(
-        &h.ingress_host,
-        h.ingress_port,
-        harness::AUTHOR_FROM,
-        harness::POSTING_ADDRESS,
-        raw,
-    )
-    .await?;
+    sender::inject(&h.ingress_host, h.ingress_port, mail_from, to, raw).await?;
 
     // The ingress only returns 2xx after delivery to the sink has completed, so a verdict is
     // already recorded; poll briefly to be robust against scheduling.

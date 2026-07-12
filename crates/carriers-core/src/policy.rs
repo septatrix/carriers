@@ -27,6 +27,10 @@
 //! configured archive (see [`crate::config::Config::archive_dir`]); the `:copy` keeps the
 //! message flowing, so this is a side effect that does not by itself change the decision, and
 //! can be used before moderation (to capture everything, including rejects) or after it.
+//! `fileinto "no-dkim"` withholds the list's own DKIM signature from the outgoing message (see
+//! "Built-in DMARC gate" below); `fileinto "munge-from"` requests From/Reply-To munging (see
+//! [`PolicyEngine::apply_munge_from`]). Like `archive`, both are independent side effects, not
+//! decisions.
 //!
 //! Membership is exposed as Sieve external lists, resolved against the *current* list, so a
 //! single global script adapts per mailing list. These are independent flags, not a hierarchy —
@@ -58,6 +62,20 @@
 //! so the loop/dedup rules live in the same place, and same language, as every other policy. The
 //! `List-*` header injection ([`PolicyEngine::apply_list_headers`], `list-headers.sieve`) is a
 //! built-in script in the same spirit — it uses `addheader` to prepend the headers, DKIM-safely.
+//!
+//! ## Built-in DMARC gate
+//!
+//! carriers must never sign an unauthenticated message with its own reputation. Two more built-in
+//! scripts, `dmarc-before.sieve` and `dmarc-after.sieve`, run first in [`PolicyEngine::evaluate_before`]
+//! and [`PolicyEngine::evaluate_after`] respectively: a message failing DMARC against an enforcing
+//! domain policy (`p=quarantine`/`p=reject`) is rejected outright — as early as `evaluate_before`,
+//! before it can even reach moderation, and again, defensively, in `evaluate_after` (DNS/policy
+//! can change while a message sits held). A message that fails DMARC but whose domain does not
+//! request enforcement is still distributed, but is filed into the `no-dkim` pseudo-mailbox so it
+//! never carries the list's own signature — only an honest ARC seal. See
+//! [`crate::sign::AuthVerdict`] for the computed facts these scripts test (exposed as
+//! `vnd.carriers.dmarc_*`/`dkim_result`/`spf_result` environment variables to every tier, not just
+//! these two built-ins).
 //!
 //! ## Global policy
 //!
@@ -159,19 +177,34 @@ pub enum PolicyDecision {
 }
 
 /// What one or more policy tiers decided for a message: the moderation [`PolicyDecision`], plus
-/// whether any tier that ran filed the message into the `archive` pseudo-mailbox
-/// (`fileinto :copy "archive"`). Archiving is independent of the decision — a message can be
-/// archived and then held, distributed, discarded, or rejected.
+/// independent side-effect flags any tier that ran may have requested by filing into a
+/// pseudo-mailbox — a message can be archived and/or have its own signature withheld and/or be
+/// scheduled for From/Reply-To munging regardless of whether it is held, distributed, discarded,
+/// or rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyOutcome {
     pub decision: PolicyDecision,
+    /// Filed into `archive` (`fileinto :copy "archive"`).
     pub archive: bool,
+    /// Filed into `no-dkim`: the message must not carry the list's own `DKIM-Signature` when
+    /// distributed (see `builtin_policies/dmarc-after.sieve`). Only consulted from
+    /// [`PolicyEngine::evaluate_after`]'s outcome, since that is the tier immediately preceding
+    /// signing; a "before" tier filing into this pseudo-mailbox has no effect.
+    pub no_own_dkim: bool,
+    /// Filed into `munge-from`: rewrite `From`/`Reply-To` to the list's own address before
+    /// signing (see [`PolicyEngine::apply_munge_from`]). Nothing built-in sets this yet; it is an
+    /// available mechanism for custom scripts. Same "after"-tier-only caveat as `no_own_dkim`.
+    pub munge_from: bool,
 }
 
 /// `fileinto` pseudo-mailbox names that hold a message for moderation.
 const MODERATE_FOLDERS: &[&str] = &["moderate", "moderation", "hold"];
 /// `fileinto` pseudo-mailbox name that archives a copy of the message.
 pub const ARCHIVE_FOLDER: &str = "archive";
+/// `fileinto` pseudo-mailbox name that withholds the list's own DKIM signature.
+pub const NO_DKIM_FOLDER: &str = "no-dkim";
+/// `fileinto` pseudo-mailbox name that requests From/Reply-To munging.
+pub const MUNGE_FROM_FOLDER: &str = "munge-from";
 
 /// Membership facts for the current list, resolved before evaluating a (synchronous) script.
 /// Addresses are stored lowercased. These are independent sets, not a hierarchy: an address in
@@ -214,6 +247,9 @@ pub struct PolicyEngine {
     loop_check: Arc<Sieve>,
     duplicate_check: Arc<Sieve>,
     list_headers: Arc<Sieve>,
+    dmarc_before_gate: Arc<Sieve>,
+    dmarc_after_gate: Arc<Sieve>,
+    munge_from_script: Arc<Sieve>,
     policies: HashMap<String, Arc<Sieve>>,
     global_before: Vec<Arc<Sieve>>,
     global_after: Vec<Arc<Sieve>>,
@@ -239,6 +275,18 @@ impl PolicyEngine {
             "list-headers",
             include_str!("builtin_policies/list-headers.sieve"),
         )?;
+        let dmarc_before_gate = compile_builtin(
+            "dmarc-before",
+            include_str!("builtin_policies/dmarc-before.sieve"),
+        )?;
+        let dmarc_after_gate = compile_builtin(
+            "dmarc-after",
+            include_str!("builtin_policies/dmarc-after.sieve"),
+        )?;
+        let munge_from_script = compile_builtin(
+            "munge-from",
+            include_str!("builtin_policies/munge-from.sieve"),
+        )?;
 
         let mut policies = HashMap::new();
         for (name, script) in BUILTIN_SCRIPTS {
@@ -249,6 +297,9 @@ impl PolicyEngine {
             loop_check,
             duplicate_check,
             list_headers,
+            dmarc_before_gate,
+            dmarc_after_gate,
+            munge_from_script,
             policies,
             global_before: Vec::new(),
             global_after: Vec::new(),
@@ -385,6 +436,7 @@ impl PolicyEngine {
                 raw,
                 &NO_LISTS,
                 &NoDuplicates,
+                &[],
             )
             .await?;
         Ok(matches!(run.outcome, SieveOutcome::Discard))
@@ -410,6 +462,7 @@ impl PolicyEngine {
                 raw,
                 &NO_LISTS,
                 duplicates,
+                &[],
             )
             .await?;
         Ok(matches!(run.outcome, SieveOutcome::Discard))
@@ -442,11 +495,40 @@ impl PolicyEngine {
         Ok(run.message.unwrap_or_else(|| raw.to_vec()))
     }
 
+    /// Apply the built-in `munge-from.sieve` script to `raw`, rewriting `From`/`Reply-To` to the
+    /// values supplied in `munge_env` (see [`crate::transform::munge_from_env`]). Returns the
+    /// rewritten message bytes (or `raw` unchanged if the script made no edits).
+    pub async fn apply_munge_from(
+        &self,
+        list_name: &str,
+        list_id: &str,
+        munge_env: &[(&str, &str)],
+        raw: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut env = vec![(ENV_LIST, list_name), (ENV_LIST_ID, list_id)];
+        env.extend_from_slice(munge_env);
+        let run = self
+            .engine
+            .run(
+                "munge-from",
+                &self.munge_from_script,
+                raw,
+                "",
+                &env,
+                &NO_LISTS,
+                &NoDuplicates,
+            )
+            .await?;
+        Ok(run.message.unwrap_or_else(|| raw.to_vec()))
+    }
+
     /// Evaluate the named policy against a message.
     ///
     /// `list_name`/`list_id` are exposed to the script as the `vnd.carriers.list` /
     /// `vnd.carriers.list_id` environment variables; `mail_from` is the envelope sender; `sets`
-    /// resolves the membership `:list` tests.
+    /// resolves the membership `:list` tests; `extra_env` is appended as further environment
+    /// variables (e.g. the `vnd.carriers.dmarc_*` facts — see [`crate::sign::AuthVerdict`]).
+    #[allow(clippy::too_many_arguments)]
     pub async fn evaluate(
         &self,
         name: &str,
@@ -455,13 +537,16 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
+        extra_env: &[(&str, &str)],
     ) -> Result<PolicyOutcome> {
         let script = self
             .policies
             .get(name)
             .ok_or_else(|| Error::Config(format!("unknown policy `{name}`")))?;
-        self.run_tier(script, name, list_name, list_id, mail_from, raw, sets)
-            .await
+        self.run_tier(
+            script, name, list_name, list_id, mail_from, raw, sets, extra_env,
+        )
+        .await
     }
 
     /// The "before" half of the policy chain, decided at intake: the global "before" drop-ins,
@@ -482,9 +567,26 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
+        extra_env: &[(&str, &str)],
     ) -> Result<PolicyOutcome> {
         let domain_scripts = self.domains.get(domain);
         let mut acc = Accumulator::default();
+
+        // The built-in DMARC gate runs first, ahead of every configurable tier — a message
+        // failing DMARC against an enforcing domain policy is rejected before it can even reach
+        // moderation. See `builtin_policies/dmarc-before.sieve` and `crate::sign::AuthVerdict`.
+        self.run_scripts(
+            std::slice::from_ref(&self.dmarc_before_gate),
+            "dmarc-before",
+            list_name,
+            list_id,
+            mail_from,
+            raw,
+            sets,
+            extra_env,
+            &mut acc,
+        )
+        .await?;
 
         self.run_scripts(
             &self.global_before,
@@ -494,6 +596,7 @@ impl PolicyEngine {
             mail_from,
             raw,
             sets,
+            extra_env,
             &mut acc,
         )
         .await?;
@@ -506,6 +609,7 @@ impl PolicyEngine {
                 mail_from,
                 raw,
                 sets,
+                extra_env,
                 &mut acc,
             )
             .await?;
@@ -515,7 +619,15 @@ impl PolicyEngine {
         // policy only runs while the decision so far is still `Approve`.
         if matches!(acc.decision, PolicyDecision::Approve) {
             let out = self
-                .evaluate(policy_name, list_name, list_id, mail_from, raw, sets)
+                .evaluate(
+                    policy_name,
+                    list_name,
+                    list_id,
+                    mail_from,
+                    raw,
+                    sets,
+                    extra_env,
+                )
                 .await?;
             acc.merge(out);
         }
@@ -527,6 +639,7 @@ impl PolicyEngine {
     /// [`crate::pipeline::finalize`]): this domain's "after" drop-ins, then the global "after"
     /// drop-ins, each run in filename order. It starts from `Approve` (only about-to-distribute
     /// messages reach it) and may tighten that to a hold, discard, or reject — or archive it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn evaluate_after(
         &self,
         list_name: &str,
@@ -535,9 +648,27 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
+        extra_env: &[(&str, &str)],
     ) -> Result<PolicyOutcome> {
         let domain_scripts = self.domains.get(domain);
         let mut acc = Accumulator::default();
+
+        // The built-in DMARC gate runs first: the last-word check on whether this message may
+        // carry the list's own DKIM signature (or must be rejected outright, if the author
+        // domain's DNS/policy state changed since an earlier "before"-tier pass let it through —
+        // see `builtin_policies/dmarc-after.sieve`).
+        self.run_scripts(
+            std::slice::from_ref(&self.dmarc_after_gate),
+            "dmarc-after",
+            list_name,
+            list_id,
+            mail_from,
+            raw,
+            sets,
+            extra_env,
+            &mut acc,
+        )
+        .await?;
 
         if let Some(d) = domain_scripts {
             self.run_scripts(
@@ -548,6 +679,7 @@ impl PolicyEngine {
                 mail_from,
                 raw,
                 sets,
+                extra_env,
                 &mut acc,
             )
             .await?;
@@ -560,6 +692,7 @@ impl PolicyEngine {
             mail_from,
             raw,
             sets,
+            extra_env,
             &mut acc,
         )
         .await?;
@@ -579,6 +712,7 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
+        extra_env: &[(&str, &str)],
         acc: &mut Accumulator,
     ) -> Result<()> {
         for script in scripts {
@@ -586,7 +720,9 @@ impl PolicyEngine {
                 break;
             }
             let out = self
-                .run_tier(script, tier_name, list_name, list_id, mail_from, raw, sets)
+                .run_tier(
+                    script, tier_name, list_name, list_id, mail_from, raw, sets, extra_env,
+                )
                 .await?;
             acc.merge(out);
         }
@@ -603,6 +739,7 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
+        extra_env: &[(&str, &str)],
     ) -> Result<PolicyOutcome> {
         // A policy tier never tracks duplicates; only the built-in duplicate check does (see the
         // `NoDuplicates` docs), so a stray `duplicate` test in a policy script is inert.
@@ -616,6 +753,7 @@ impl PolicyEngine {
                 raw,
                 sets,
                 &NoDuplicates,
+                extra_env,
             )
             .await?;
         Ok(outcome_from_run(run))
@@ -632,17 +770,12 @@ impl PolicyEngine {
         raw: &[u8],
         lists: &dyn ExternalLists,
         duplicates: &dyn DuplicateStore,
+        extra_env: &[(&str, &str)],
     ) -> Result<SieveRun> {
+        let mut env = vec![(ENV_LIST, list_name), (ENV_LIST_ID, list_id)];
+        env.extend_from_slice(extra_env);
         self.engine
-            .run(
-                name,
-                script,
-                raw,
-                mail_from,
-                &[(ENV_LIST, list_name), (ENV_LIST_ID, list_id)],
-                lists,
-                duplicates,
-            )
+            .run(name, script, raw, mail_from, &env, lists, duplicates)
             .await
     }
 }
@@ -660,10 +793,12 @@ impl ExternalLists for NoLists {
 }
 
 /// Running state while folding a sequence of policy tiers/drop-in scripts together: the decision
-/// reached so far and whether any of them requested an archive copy.
+/// reached so far and whether any of them requested each independent side effect.
 struct Accumulator {
     decision: PolicyDecision,
     archive: bool,
+    no_own_dkim: bool,
+    munge_from: bool,
 }
 
 impl Default for Accumulator {
@@ -671,6 +806,8 @@ impl Default for Accumulator {
         Accumulator {
             decision: PolicyDecision::Approve,
             archive: false,
+            no_own_dkim: false,
+            munge_from: false,
         }
     }
 }
@@ -678,6 +815,8 @@ impl Default for Accumulator {
 impl Accumulator {
     fn merge(&mut self, out: PolicyOutcome) {
         self.archive |= out.archive;
+        self.no_own_dkim |= out.no_own_dkim;
+        self.munge_from |= out.munge_from;
         self.decision = merge(
             std::mem::replace(&mut self.decision, PolicyDecision::Approve),
             out.decision,
@@ -688,6 +827,8 @@ impl Accumulator {
         PolicyOutcome {
             decision: self.decision,
             archive: self.archive,
+            no_own_dkim: self.no_own_dkim,
+            munge_from: self.munge_from,
         }
     }
 }
@@ -714,10 +855,13 @@ fn is_terminal(decision: &PolicyDecision) -> bool {
 /// Interpret a completed [`SieveRun`] as a [`PolicyOutcome`].
 ///
 /// `discard`/`reject` are terminal. Otherwise the `fileinto` destinations decide: filing into a
-/// moderation pseudo-mailbox holds the message, filing into `archive` requests an archive copy
-/// (independent of the decision), and anything else is ordinary delivery (approve).
+/// moderation pseudo-mailbox holds the message; filing into `archive`/`no-dkim`/`munge-from`
+/// requests that independent side effect (independent of the decision); anything else is
+/// ordinary delivery (approve).
 fn outcome_from_run(run: SieveRun) -> PolicyOutcome {
     let archive = run.filed_into.iter().any(|f| is_archive_folder(f));
+    let no_own_dkim = run.filed_into.iter().any(|f| is_no_dkim_folder(f));
+    let munge_from = run.filed_into.iter().any(|f| is_munge_from_folder(f));
     let decision = match run.outcome {
         SieveOutcome::Discard => PolicyDecision::Discard,
         SieveOutcome::Reject { reason } => PolicyDecision::Reject { reason },
@@ -729,7 +873,12 @@ fn outcome_from_run(run: SieveRun) -> PolicyOutcome {
             }
         }
     };
-    PolicyOutcome { decision, archive }
+    PolicyOutcome {
+        decision,
+        archive,
+        no_own_dkim,
+        munge_from,
+    }
 }
 
 fn is_moderate_folder(folder: &str) -> bool {
@@ -740,4 +889,12 @@ fn is_moderate_folder(folder: &str) -> bool {
 
 fn is_archive_folder(folder: &str) -> bool {
     folder.eq_ignore_ascii_case(ARCHIVE_FOLDER)
+}
+
+fn is_no_dkim_folder(folder: &str) -> bool {
+    folder.eq_ignore_ascii_case(NO_DKIM_FOLDER)
+}
+
+fn is_munge_from_folder(folder: &str) -> bool {
+    folder.eq_ignore_ascii_case(MUNGE_FROM_FOLDER)
 }

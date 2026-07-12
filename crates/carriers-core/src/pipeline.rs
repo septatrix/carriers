@@ -13,7 +13,7 @@ use crate::list::List;
 use crate::member::MemberProvider;
 use crate::policy::{MembershipSets, PolicyDecision, PolicyEngine};
 use crate::sieve_engine::DuplicateStore;
-use crate::sign::{Ingress, sign_and_seal};
+use crate::sign::{self, Ingress, sign_and_seal};
 use crate::store::Store;
 use crate::transform;
 
@@ -128,6 +128,14 @@ pub async fn intake(
     let sender = from_address(&parsed);
     let sets = membership_sets(members, &list.name).await?;
 
+    // DMARC/DKIM/SPF facts for this message, exposed to the "before" chain as `vnd.carriers.*`
+    // environment variables — in particular the built-in `dmarc-before.sieve` gate, which rejects
+    // outright a message failing DMARC against an enforcing domain policy (see
+    // `sign::evaluate_dmarc`), before it can even reach moderation.
+    let verdict = sign::evaluate_dmarc(authenticator, hostname, ingress, raw).await?;
+    let auth_env = verdict.env_pairs();
+    let auth_env: Vec<(&str, &str)> = auth_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
     // The "before" half of the policy chain decides moderation: the global/domain "before"
     // scripts and the list's own policy (`list.cfg.policy` — a built-in name or a custom
     // `<name>.sieve`). The "after" half runs later, in `finalize` (see `evaluate_after`).
@@ -141,6 +149,7 @@ pub async fn intake(
             &ingress.mail_from,
             raw,
             &sets,
+            &auth_env,
         )
         .await?;
 
@@ -267,6 +276,13 @@ pub async fn finalize(
     let list_id = list.list_id();
     let sets = membership_sets(members, &list.name).await?;
 
+    // Recomputed independently of any earlier `intake` pass (a message may have sat held for
+    // moderation, during which the author domain's DNS/policy state could have changed) — see
+    // `sign::evaluate_dmarc`.
+    let verdict = sign::evaluate_dmarc(authenticator, hostname, ingress, raw).await?;
+    let auth_env = verdict.env_pairs();
+    let auth_env: Vec<(&str, &str)> = auth_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
     let outcome = policy
         .evaluate_after(
             &list.name,
@@ -275,6 +291,7 @@ pub async fn finalize(
             &ingress.mail_from,
             raw,
             &sets,
+            &auth_env,
         )
         .await?;
 
@@ -287,13 +304,37 @@ pub async fn finalize(
     match outcome.decision {
         PolicyDecision::Approve => {
             let recipients = members.recipients(&list.name).await?;
+
+            // An "after" tier may request From/Reply-To munging (`fileinto "munge-from"`) — an
+            // available mechanism, not applied unless a script explicitly asks for it.
+            let munged;
+            let raw = if outcome.munge_from {
+                let munge_env = transform::munge_from_env(list, raw);
+                let munge_env: Vec<(&str, &str)> =
+                    munge_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                munged = policy
+                    .apply_munge_from(&list.name, &list_id, &munge_env, raw)
+                    .await?;
+                munged.as_slice()
+            } else {
+                raw
+            };
+
             let owned = transform::list_header_env(list);
             let header_env: Vec<(&str, &str)> =
                 owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
             let augmented = policy
                 .apply_list_headers(&list.name, &list_id, &header_env, raw)
                 .await?;
-            let message = sign_and_seal(authenticator, list, hostname, &augmented, ingress).await?;
+            let message = sign_and_seal(
+                authenticator,
+                list,
+                hostname,
+                &augmented,
+                ingress,
+                outcome.no_own_dkim,
+            )
+            .await?;
 
             let return_path_local = list
                 .cfg
