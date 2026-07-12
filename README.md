@@ -179,6 +179,13 @@ Sieve actions:
   and the given reason, so a legitimate sender finds out and can act (e.g. ask to subscribe).
   The reason is sanitised before being echoed into the SMTP reply (stripped of CR/LF, length
   capped) since it may indirectly reflect attacker-controlled message content.
+- `fileinto :copy "archive";` — **archive** a copy of the message (as received) under
+  `archive_dir`, as `<archive_dir>/<list>/<timestamp>-<message-id>.eml`. `fileinto` destinations
+  are pseudo-mailboxes, not real folders — `archive` (like `moderate`) is interpreted by name.
+  The `:copy` keeps the message flowing, so archiving is a side effect that doesn't itself change
+  the decision: put it in a "before" script to capture everything (including posts later
+  rejected, handy for debugging) or in an "after" script for a plain archive of what goes out.
+  If no `archive_dir` is configured, the `fileinto` is a no-op and logs a warning.
 
 Membership is exposed as Sieve external lists, resolved against the *current* list, so one
 global script adapts per mailing list. These are independent flags, not a hierarchy —
@@ -306,19 +313,20 @@ address is disabled — it is skipped as a recipient — until an operator runs
 
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
 open / subscribers / posters / moderated modes, or a Sieve script), optional instance-wide and
-per-domain Sieve scripts wrapped before/after every list's own policy, VERP bounce processing
-with automatic delivery disabling, loop and duplicate suppression, `List-*` headers, aligned
-DKIM signing, ARC sealing, smarthost delivery, flat-file lists + SQLite membership (independent
-subscriber, poster and moderator roles), key generation.
+per-domain Sieve scripts wrapped before/after every list's own policy, on-disk `.eml` archiving
+(`fileinto :copy "archive"`), VERP bounce processing with automatic delivery disabling, loop and
+duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost delivery,
+flat-file lists + SQLite membership (independent subscriber, poster and moderator roles), key
+generation.
 
 Deferred / ideas:
 
 - STARTTLS / implicit TLS on the listener
 - direct-to-MX delivery (its own retry queue) instead of a smarthost
 - a REST / pull-based member API
-- message archiving: store each distributed post as an `.eml` file on disk under a per-list
-  subdirectory, with a search index (full-text over headers/body) for retrieval; a web archive
-  could be layered on top
+- message archiving: on-disk `.eml` archiving is implemented (`fileinto :copy "archive"` writes
+  each post under a per-list subdirectory — see "Posting policy and moderation"). Still open: a
+  search index (full-text over headers/body) for retrieval, and a web archive layered on top
 - opt-in `Subject`-prefix / footer support
 - richer policy context (spam/DKIM results, message size) exposed to scripts
 - custom Sieve functions registered via the runtime builder's `with_functions`, so policy

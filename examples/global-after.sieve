@@ -7,7 +7,13 @@
 # further — e.g. escalating it to an outright reject — but it can never turn a hold or a reject
 # back into an approval.
 
-require ["envelope", "reject"];
+require ["envelope", "reject", "fileinto", "copy"];
+
+# Archive a copy of every post that is about to go out, under archive_dir (see carriers.toml).
+# `:copy` keeps the message flowing, so this is just a side effect — put it here (after
+# moderation) for a normal archive, or in a "before" script to capture everything, including
+# posts that are later rejected.
+fileinto :copy "archive";
 
 # Escalate anything already flagged as suspicious by an upstream spam filter, regardless of what
 # the list's own policy decided.

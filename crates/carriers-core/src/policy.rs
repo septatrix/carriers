@@ -22,6 +22,12 @@
 //!   MTA with the given reason (a real-time SMTP rejection, not a bounce, so this does not
 //!   generate backscatter).
 //!
+//! `fileinto` destinations are read as pseudo-mailboxes, not real folders. Besides the
+//! moderation folders above, `fileinto :copy "archive"` writes a copy of the post to the
+//! configured archive (see [`crate::config::Config::archive_dir`]); the `:copy` keeps the
+//! message flowing, so this is a side effect that does not by itself change the decision, and
+//! can be used before moderation (to capture everything, including rejects) or after it.
+//!
 //! Membership is exposed as Sieve external lists, resolved against the *current* list, so a
 //! single global script adapts per mailing list. These are independent flags, not a hierarchy —
 //! a subscriber is not automatically a poster, and a poster is not automatically a subscriber:
@@ -147,6 +153,21 @@ pub enum PolicyDecision {
     /// sender as a real-time SMTP rejection.
     Reject { reason: String },
 }
+
+/// What one or more policy tiers decided for a message: the moderation [`PolicyDecision`], plus
+/// whether any tier that ran filed the message into the `archive` pseudo-mailbox
+/// (`fileinto :copy "archive"`). Archiving is independent of the decision — a message can be
+/// archived and then held, distributed, discarded, or rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyOutcome {
+    pub decision: PolicyDecision,
+    pub archive: bool,
+}
+
+/// `fileinto` pseudo-mailbox names that hold a message for moderation.
+const MODERATE_FOLDERS: &[&str] = &["moderate", "moderation", "hold"];
+/// `fileinto` pseudo-mailbox name that archives a copy of the message.
+pub const ARCHIVE_FOLDER: &str = "archive";
 
 /// Membership facts for the current list, resolved before evaluating a (synchronous) script.
 /// Addresses are stored lowercased. These are independent sets, not a hierarchy: an address in
@@ -402,7 +423,7 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
-    ) -> Result<PolicyDecision> {
+    ) -> Result<PolicyOutcome> {
         let script = self
             .policies
             .get(name)
@@ -416,6 +437,9 @@ impl PolicyEngine {
     /// these compose. Any tier that was never configured (via
     /// [`PolicyEngine::with_global_before`] and friends, or because `domain` has no entry) is
     /// simply skipped. The "after" half runs later, in [`PolicyEngine::evaluate_after`].
+    ///
+    /// The returned `archive` flag is the union across every tier that ran, so a message is
+    /// archived if any of them filed it into the `archive` pseudo-mailbox.
     #[allow(clippy::too_many_arguments)]
     pub async fn evaluate_before(
         &self,
@@ -426,12 +450,13 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
-    ) -> Result<PolicyDecision> {
+    ) -> Result<PolicyOutcome> {
         let domain_scripts = self.domains.get(domain);
         let mut decision = PolicyDecision::Approve;
+        let mut archive = false;
 
         if let Some(script) = &self.global_before {
-            let tier = self
+            let out = self
                 .run_tier(
                     script,
                     "global-before",
@@ -442,14 +467,15 @@ impl PolicyEngine {
                     sets,
                 )
                 .await?;
-            decision = merge(decision, tier);
+            archive |= out.archive;
+            decision = merge(decision, out.decision);
         }
         if is_terminal(&decision) {
-            return Ok(decision);
+            return Ok(PolicyOutcome { decision, archive });
         }
 
         if let Some(script) = domain_scripts.and_then(|d| d.before.as_ref()) {
-            let tier = self
+            let out = self
                 .run_tier(
                     script,
                     "domain-before",
@@ -460,28 +486,30 @@ impl PolicyEngine {
                     sets,
                 )
                 .await?;
-            decision = merge(decision, tier);
+            archive |= out.archive;
+            decision = merge(decision, out.decision);
         }
         if is_terminal(&decision) {
-            return Ok(decision);
+            return Ok(PolicyOutcome { decision, archive });
         }
 
         // An earlier `Moderate` already means the message will be held; the list's own policy
         // has nothing to add, so it only runs while the decision so far is still `Approve`.
         if matches!(decision, PolicyDecision::Approve) {
-            let tier = self
+            let out = self
                 .evaluate(policy_name, list_name, list_id, mail_from, raw, sets)
                 .await?;
-            decision = merge(decision, tier);
+            archive |= out.archive;
+            decision = merge(decision, out.decision);
         }
-        Ok(decision)
+        Ok(PolicyOutcome { decision, archive })
     }
 
     /// The "after" half of the policy chain, decided at distribution time — after moderation —
     /// so it has the final word on a message about to go out (see
     /// [`crate::pipeline::finalize`]): this domain's "after" script, then the global "after"
     /// script. It starts from `Approve` (only about-to-distribute messages reach it) and may
-    /// tighten that to a hold, discard, or reject.
+    /// tighten that to a hold, discard, or reject — or archive it.
     pub async fn evaluate_after(
         &self,
         list_name: &str,
@@ -490,12 +518,13 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
-    ) -> Result<PolicyDecision> {
+    ) -> Result<PolicyOutcome> {
         let domain_scripts = self.domains.get(domain);
         let mut decision = PolicyDecision::Approve;
+        let mut archive = false;
 
         if let Some(script) = domain_scripts.and_then(|d| d.after.as_ref()) {
-            let tier = self
+            let out = self
                 .run_tier(
                     script,
                     "domain-after",
@@ -506,14 +535,15 @@ impl PolicyEngine {
                     sets,
                 )
                 .await?;
-            decision = merge(decision, tier);
+            archive |= out.archive;
+            decision = merge(decision, out.decision);
         }
         if is_terminal(&decision) {
-            return Ok(decision);
+            return Ok(PolicyOutcome { decision, archive });
         }
 
         if let Some(script) = &self.global_after {
-            let tier = self
+            let out = self
                 .run_tier(
                     script,
                     "global-after",
@@ -524,9 +554,10 @@ impl PolicyEngine {
                     sets,
                 )
                 .await?;
-            decision = merge(decision, tier);
+            archive |= out.archive;
+            decision = merge(decision, out.decision);
         }
-        Ok(decision)
+        Ok(PolicyOutcome { decision, archive })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -539,7 +570,7 @@ impl PolicyEngine {
         mail_from: &str,
         raw: &[u8],
         sets: &MembershipSets,
-    ) -> Result<PolicyDecision> {
+    ) -> Result<PolicyOutcome> {
         // A policy tier never tracks duplicates; only the built-in duplicate check does (see the
         // `NoDuplicates` docs), so a stray `duplicate` test in a policy script is inert.
         let run = self
@@ -554,7 +585,7 @@ impl PolicyEngine {
                 &NoDuplicates,
             )
             .await?;
-        Ok(decision_from_outcome(run.outcome))
+        Ok(outcome_from_run(run))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -614,21 +645,33 @@ fn is_terminal(decision: &PolicyDecision) -> bool {
     )
 }
 
-/// Map a [`SieveOutcome`] to the carriers-specific [`PolicyDecision`] it represents.
-fn decision_from_outcome(outcome: SieveOutcome) -> PolicyDecision {
-    match outcome {
-        SieveOutcome::Keep => PolicyDecision::Approve,
+/// Interpret a completed [`SieveRun`] as a [`PolicyOutcome`].
+///
+/// `discard`/`reject` are terminal. Otherwise the `fileinto` destinations decide: filing into a
+/// moderation pseudo-mailbox holds the message, filing into `archive` requests an archive copy
+/// (independent of the decision), and anything else is ordinary delivery (approve).
+fn outcome_from_run(run: SieveRun) -> PolicyOutcome {
+    let archive = run.filed_into.iter().any(|f| is_archive_folder(f));
+    let decision = match run.outcome {
         SieveOutcome::Discard => PolicyDecision::Discard,
         SieveOutcome::Reject { reason } => PolicyDecision::Reject { reason },
-        SieveOutcome::FileInto { folder } => classify_folder(&folder),
-    }
+        SieveOutcome::Keep => {
+            if run.filed_into.iter().any(|f| is_moderate_folder(f)) {
+                PolicyDecision::Moderate
+            } else {
+                PolicyDecision::Approve
+            }
+        }
+    };
+    PolicyOutcome { decision, archive }
 }
 
-/// Any `fileinto` destination named like a moderation folder holds the message; anything else
-/// is treated as ordinary delivery (approve) — a real MDA would just file it into that mailbox.
-fn classify_folder(folder: &str) -> PolicyDecision {
-    match folder.to_ascii_lowercase().as_str() {
-        "moderate" | "moderation" | "hold" => PolicyDecision::Moderate,
-        _ => PolicyDecision::Approve,
-    }
+fn is_moderate_folder(folder: &str) -> bool {
+    MODERATE_FOLDERS
+        .iter()
+        .any(|m| folder.eq_ignore_ascii_case(m))
+}
+
+fn is_archive_folder(folder: &str) -> bool {
+    folder.eq_ignore_ascii_case(ARCHIVE_FOLDER)
 }

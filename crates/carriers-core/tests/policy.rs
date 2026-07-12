@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use carriers_core::policy::{MembershipSets, PolicyDecision, PolicyEngine};
+use carriers_core::policy::{MembershipSets, PolicyDecision, PolicyEngine, PolicyOutcome};
 use carriers_core::sieve_engine::{DuplicateStore, NoDuplicates};
 
 /// A stand-in `List-Id` for the tests; the built-in checks don't run through `evaluate*`, so its
@@ -67,6 +67,7 @@ async fn sieve_policy_decides_approve_moderate_discard_reject() {
             .evaluate("corporate", "dev", LIST_ID, from, &message(from), &sets)
             .await
             .unwrap()
+            .decision
     };
 
     // Subscriber -> approve; poster (not a subscriber) -> moderate; known spammer -> silently
@@ -98,7 +99,8 @@ async fn empty_script_approves_by_default() {
                 &MembershipSets::default()
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .decision,
         PolicyDecision::Approve
     );
 }
@@ -119,6 +121,7 @@ async fn builtin_policies_behave_like_the_posting_modes() {
             .evaluate(policy, "dev", LIST_ID, from, &message(from), &sets)
             .await
             .unwrap()
+            .decision
     };
 
     // open: everyone approved.
@@ -271,6 +274,7 @@ async fn eval_before(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyD
         )
         .await
         .unwrap()
+        .decision
 }
 
 /// The "after" half of the chain (domain-after -> global-after), decided at distribution time.
@@ -279,6 +283,7 @@ async fn eval_after(engine: &PolicyEngine, domain: &str, from: &str) -> PolicyDe
         .evaluate_after("dev", LIST_ID, domain, from, &message(from), &sets())
         .await
         .unwrap()
+        .decision
 }
 
 #[tokio::test]
@@ -466,6 +471,120 @@ async fn full_chain_runs_in_order_before_at_intake_after_at_finalize() {
         eval_after(&engine, "lists.example.com", "alice@example.com").await,
         PolicyDecision::Reject {
             reason: "final word".to_string()
+        }
+    );
+}
+
+#[tokio::test]
+async fn fileinto_copy_archive_requests_an_archive_but_keeps_the_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    // A before-script archives every message but takes no decision of its own.
+    let before = write_sieve(
+        dir.path(),
+        "before.sieve",
+        "require [\"fileinto\", \"copy\"]; fileinto :copy \"archive\";\n",
+    );
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_before(&before)
+        .unwrap();
+
+    // alice (a subscriber) is approved by the list policy, and archiving is requested alongside.
+    let out = engine
+        .evaluate_before(
+            "corporate",
+            "dev",
+            LIST_ID,
+            "lists.example.org",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        PolicyOutcome {
+            decision: PolicyDecision::Approve,
+            archive: true,
+        }
+    );
+
+    // The archive flag rides along with an authoritative decision too: mallory is rejected by the
+    // list policy, but the before-script still asked to archive her post.
+    let out = engine
+        .evaluate_before(
+            "corporate",
+            "dev",
+            LIST_ID,
+            "lists.example.org",
+            "mallory@evil.example",
+            &message("mallory@evil.example"),
+            &sets(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.decision,
+        PolicyDecision::Reject {
+            reason: "Only subscribers and posters may write to this list.".to_string()
+        }
+    );
+    assert!(out.archive);
+}
+
+#[tokio::test]
+async fn no_archive_when_no_tier_files_into_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let engine = PolicyEngine::load(dir.path()).unwrap();
+
+    let out = engine
+        .evaluate_before(
+            "corporate",
+            "dev",
+            LIST_ID,
+            "lists.example.org",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .await
+        .unwrap();
+    assert!(!out.archive);
+}
+
+#[tokio::test]
+async fn archive_can_be_requested_by_the_after_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", POLICY);
+    let after = write_sieve(
+        dir.path(),
+        "after.sieve",
+        "require [\"fileinto\", \"copy\"]; fileinto :copy \"archive\";\n",
+    );
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_after(&after)
+        .unwrap();
+
+    let out = engine
+        .evaluate_after(
+            "dev",
+            LIST_ID,
+            "lists.example.org",
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        PolicyOutcome {
+            decision: PolicyDecision::Approve,
+            archive: true,
         }
     );
 }

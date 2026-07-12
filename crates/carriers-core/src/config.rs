@@ -36,6 +36,12 @@ pub struct Config {
     #[serde(default)]
     pub policies_dir: Option<PathBuf>,
 
+    /// Directory under which archived posts are written, as `<archive_dir>/<list>/<file>.eml`,
+    /// when a policy files a message into the `archive` pseudo-mailbox
+    /// (`fileinto :copy "archive"`). If unset, such a `fileinto` is a no-op.
+    #[serde(default)]
+    pub archive_dir: Option<PathBuf>,
+
     /// Global and per-domain Sieve scripts run around every list's own `policy` — see the
     /// README's "Global policy" section.
     #[serde(default)]

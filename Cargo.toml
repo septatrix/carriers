@@ -10,7 +10,7 @@ repository = "https://github.com/septatrix/carriers"
 
 [workspace.dependencies]
 carriers-core = { path = "crates/carriers-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"

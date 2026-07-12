@@ -45,7 +45,9 @@ impl DuplicateStore for NoDuplicates {
 ///
 /// `discard` and `reject`/`ereject` are deliberately distinct: `discard` silently drops the
 /// message with no indication to the sender (RFC 5228 §4.4), while `reject`/`ereject` refuses
-/// it and carries a reason meant to be surfaced back to the sender (RFC 5429).
+/// it and carries a reason meant to be surfaced back to the sender (RFC 5429). A `fileinto` is
+/// not a terminal action here — its destination is reported via [`SieveRun::filed_into`] and
+/// interpreted by the caller (see `policy`), so the script continues past it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SieveOutcome {
     /// `keep;`, or the script ran to completion with no decisive action (implicit keep).
@@ -54,16 +56,18 @@ pub enum SieveOutcome {
     Discard,
     /// `reject "reason";` / `ereject "reason";` — explicitly refuse, with a reason.
     Reject { reason: String },
-    /// `fileinto "folder";`.
-    FileInto { folder: String },
 }
 
-/// The result of running one Sieve script: its terminal [`SieveOutcome`], plus the rewritten
-/// message bytes if the script edited headers (`addheader`/`deleteheader`, RFC 5293). `message`
-/// is `None` when the script made no header changes, so the caller keeps the original bytes.
+/// The result of running one Sieve script.
 pub struct SieveRun {
+    /// The terminal action the script took.
     pub outcome: SieveOutcome,
+    /// The rewritten message bytes if the script edited headers (`addheader`/`deleteheader`,
+    /// RFC 5293); `None` when it made no header changes, so the caller keeps the original bytes.
     pub message: Option<Vec<u8>>,
+    /// Every `fileinto` destination the script named, in order. carriers reads these as
+    /// pseudo-mailboxes (e.g. `moderate`, `archive`) rather than real folders.
+    pub filed_into: Vec<String>,
 }
 
 /// A compiler and runtime for Sieve scripts, plus the external `:list` names scripts may
@@ -122,6 +126,7 @@ impl SieveEngine {
 
         let mut outcome = None;
         let mut message = None;
+        let mut filed_into = Vec::new();
         let mut input = Input::script(Script::Personal(name.to_string()), script.clone());
         while let Some(event) = instance.run(input) {
             let event = event
@@ -163,8 +168,11 @@ impl SieveEngine {
                     outcome.get_or_insert(SieveOutcome::Reject { reason });
                     true.into()
                 }
+                // `fileinto` is a side channel, not a terminal action: record the destination and
+                // keep running, so the script can both file the message and reach a `keep`,
+                // `discard`, or `reject` afterwards.
                 Event::FileInto { folder, .. } => {
-                    outcome.get_or_insert(SieveOutcome::FileInto { folder });
+                    filed_into.push(folder);
                     true.into()
                 }
                 // Keep and any other action: leave the (default) outcome as-is.
@@ -175,6 +183,7 @@ impl SieveEngine {
             // No decisive action ran: implicit keep.
             outcome: outcome.unwrap_or(SieveOutcome::Keep),
             message,
+            filed_into,
         })
     }
 }

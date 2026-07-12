@@ -1,10 +1,12 @@
 //! The message-processing pipeline: policy checks, moderation, transformation, and signing.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use async_trait::async_trait;
 use mail_auth::MessageAuthenticator;
 use mail_parser::{Message, MessageParser};
+use tracing::warn;
 
 use crate::error::{Error, Result};
 use crate::list::List;
@@ -89,6 +91,7 @@ pub async fn intake(
     policy: &PolicyEngine,
     list: &List,
     hostname: &str,
+    archive_dir: Option<&Path>,
     ingress: &Ingress,
     raw: &[u8],
 ) -> Result<Disposition> {
@@ -129,7 +132,7 @@ pub async fn intake(
     // scripts and the list's own policy (`list.cfg.policy` — a built-in name or a custom
     // `<name>.sieve`). The "after" half runs later, in `finalize` (see `evaluate_after`).
     let policy_name = list.cfg.policy.as_str();
-    let decision = policy
+    let outcome = policy
         .evaluate_before(
             policy_name,
             &list.name,
@@ -141,7 +144,13 @@ pub async fn intake(
         )
         .await?;
 
-    match decision {
+    // A "before" tier may file the message into the `archive` pseudo-mailbox — e.g. to capture
+    // every inbound post, including ones about to be rejected, for debugging.
+    if outcome.archive {
+        archive_message(archive_dir, &list.name, raw).await;
+    }
+
+    match outcome.decision {
         PolicyDecision::Approve => {
             finalize(
                 authenticator,
@@ -150,6 +159,7 @@ pub async fn intake(
                 policy,
                 list,
                 hostname,
+                archive_dir,
                 ingress,
                 raw,
             )
@@ -250,13 +260,14 @@ pub async fn finalize(
     policy: &PolicyEngine,
     list: &List,
     hostname: &str,
+    archive_dir: Option<&Path>,
     ingress: &Ingress,
     raw: &[u8],
 ) -> Result<Disposition> {
     let list_id = list.list_id();
     let sets = membership_sets(members, &list.name).await?;
 
-    let decision = policy
+    let outcome = policy
         .evaluate_after(
             &list.name,
             &list_id,
@@ -267,7 +278,13 @@ pub async fn finalize(
         )
         .await?;
 
-    match decision {
+    // An "after" tier may file the message into the `archive` pseudo-mailbox — the usual place
+    // for a plain archive, since it runs on messages that are actually about to go out.
+    if outcome.archive {
+        archive_message(archive_dir, &list.name, raw).await;
+    }
+
+    match outcome.decision {
         PolicyDecision::Approve => {
             let recipients = members.recipients(&list.name).await?;
             let owned = transform::list_header_env(list);
@@ -313,6 +330,60 @@ fn from_address(parsed: &Message) -> Option<String> {
         .and_then(|addr| addr.first())
         .and_then(|addr| addr.address())
         .map(|s| s.to_ascii_lowercase())
+}
+
+/// Write `raw` to the message archive as `<archive_dir>/<list>/<nanos>-<message-id>.eml`, the
+/// message exactly as received (the author's original DKIM intact). A no-op if `archive_dir` is
+/// unset; a failure is logged rather than propagated, so an archive problem never blocks a post.
+async fn archive_message(archive_dir: Option<&Path>, list_name: &str, raw: &[u8]) {
+    let Some(dir) = archive_dir else {
+        warn!(
+            list = list_name,
+            "policy filed a message into `archive`, but no archive_dir is configured"
+        );
+        return;
+    };
+    if let Err(err) = write_archive(dir, list_name, raw).await {
+        warn!(list = list_name, %err, "failed to archive message");
+    }
+}
+
+async fn write_archive(dir: &Path, list_name: &str, raw: &[u8]) -> Result<()> {
+    let list_dir = dir.join(list_name);
+    tokio::fs::create_dir_all(&list_dir).await?;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let id = MessageParser::default()
+        .parse(raw)
+        .and_then(|m| m.message_id().map(sanitize_message_id))
+        .unwrap_or_else(|| "no-message-id".to_string());
+
+    tokio::fs::write(list_dir.join(format!("{nanos}-{id}.eml")), raw).await?;
+    Ok(())
+}
+
+/// Reduce a `Message-ID` to a safe, bounded filename component.
+fn sanitize_message_id(id: &str) -> String {
+    let cleaned: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(120)
+        .collect();
+    let trimmed = cleaned.trim_matches('_');
+    if trimmed.is_empty() {
+        "no-message-id".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[cfg(test)]

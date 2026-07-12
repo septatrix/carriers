@@ -23,6 +23,12 @@ lists_dir = "/etc/carriers/lists"
 # extension) is the policy name.
 policies_dir = "/etc/carriers/policies"
 
+# Where archived posts are written, as `<archive_dir>/<list>/<timestamp>-<message-id>.eml`, when
+# a policy files a message into the `archive` pseudo-mailbox with `fileinto :copy "archive"` (the
+# message is stored exactly as received). Only needed if a policy actually archives; if unset,
+# such a `fileinto` is a no-op and logs a warning.
+# archive_dir = "/var/lib/carriers/archive"
+
 # Sieve scripts run for every list, wrapped around that list's own `policy` (see the README's
 # "Global policy" section). Useful for checks that apply everywhere regardless of list — e.g. a
 # shared spam/abuse blocklist — while still having access to the current list's membership

@@ -349,6 +349,7 @@ async fn handle_one(
         &state.policy,
         list,
         &state.config.hostname,
+        state.config.archive_dir.as_deref(),
         ingress,
         raw,
     )
@@ -387,6 +388,7 @@ pub async fn distribute_approved(
         &state.policy,
         list,
         &state.config.hostname,
+        state.config.archive_dir.as_deref(),
         ingress,
         raw,
     )
