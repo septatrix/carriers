@@ -271,6 +271,7 @@ before/after drop-in can also act on it:
 | `vnd.carriers.dmarc_policy` | `none` / `quarantine` / `reject` — the domain's requested enforcement (no DMARC record published and an explicit `p=none` both read as `none`) |
 | `vnd.carriers.dkim_result` | `pass` / `fail` / `none` / `temperror` / `permerror` — DMARC's DKIM-alignment leg (a passing, aligned DKIM2 chain counts here too) |
 | `vnd.carriers.spf_result` | same shape as `dkim_result` — DMARC's SPF-alignment leg |
+| `vnd.carriers.dkim1_result` | same shape as `dkim_result` — the raw classic DKIM (RFC 6376) verification result across every signature on the message, independent of DMARC alignment |
 | `vnd.carriers.dkim2_result` | same shape as `dkim_result` — the raw DKIM2 chain verification result (see "DKIM2 support" below), independent of DMARC alignment |
 
 This is a hard, unconditional invariant — there is no config toggle to disable it.

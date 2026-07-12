@@ -8,7 +8,8 @@ use mail_auth::dmarc::Policy;
 use mail_auth::dmarc::verify::DmarcParameters;
 use mail_auth::spf::verify::SpfParameters;
 use mail_auth::{
-    AuthenticatedMessage, AuthenticationResults, Dkim2Result, DmarcResult, MessageAuthenticator,
+    AuthenticatedMessage, AuthenticationResults, Dkim2Result, DkimOutput, DkimResult, DmarcResult,
+    MessageAuthenticator,
 };
 
 use crate::error::{Error, Result};
@@ -47,6 +48,12 @@ pub struct AuthVerdict {
     pub dkim_result: &'static str,
     /// DMARC's SPF-alignment leg, same shape as `dkim_result`.
     pub spf_result: &'static str,
+    /// The raw classic DKIM (RFC 6376) verification result across every signature on the
+    /// message, independent of DMARC alignment: `"pass"` if any signature verifies, otherwise the
+    /// most specific failure seen, or `"none"` if the message carries no DKIM signature at all.
+    /// Mirrors `dkim2_result`'s raw, pre-alignment shape — `dkim_result` above is the
+    /// alignment-checked leg DMARC actually decides on.
+    pub dkim1_result: &'static str,
     /// The raw DKIM2 chain verification result (draft-ietf-dkim-dkim2-spec), independent of DMARC
     /// alignment: `"pass"`/`"fail"`/`"none"`/`"temperror"`/`"permerror"`. `"none"` when the
     /// message carries no DKIM2 signature at all.
@@ -64,6 +71,7 @@ impl AuthVerdict {
             ("vnd.carriers.dmarc_policy", self.dmarc_policy.to_string()),
             ("vnd.carriers.dkim_result", self.dkim_result.to_string()),
             ("vnd.carriers.spf_result", self.spf_result.to_string()),
+            ("vnd.carriers.dkim1_result", self.dkim1_result.to_string()),
             ("vnd.carriers.dkim2_result", self.dkim2_result.to_string()),
         ]
     }
@@ -121,6 +129,7 @@ pub async fn evaluate_dmarc(
         },
         dkim_result,
         spf_result,
+        dkim1_result: dkim1_result_str(&dkim),
         dkim2_result: dkim2_result_str(dkim2.result()),
     })
 }
@@ -132,6 +141,38 @@ fn dmarc_result_str(result: &DmarcResult) -> &'static str {
         DmarcResult::TempError(_) => "temperror",
         DmarcResult::PermError(_) => "permerror",
         DmarcResult::None => "none",
+    }
+}
+
+/// Reduce every DKIM signature's raw verification result to one representative value: `"pass"`
+/// if any signature verifies (mirroring how DMARC alignment itself accepts any passing,
+/// aligned signature), otherwise the most specific failure across all of them, or `"none"` if the
+/// message carries no DKIM signature at all.
+fn dkim1_result_str(results: &[DkimOutput<'_>]) -> &'static str {
+    if results.iter().any(|o| *o.result() == DkimResult::Pass) {
+        "pass"
+    } else if results
+        .iter()
+        .any(|o| matches!(o.result(), DkimResult::Fail(_)))
+    {
+        "fail"
+    } else if results
+        .iter()
+        .any(|o| matches!(o.result(), DkimResult::TempError(_)))
+    {
+        "temperror"
+    } else if results
+        .iter()
+        .any(|o| matches!(o.result(), DkimResult::PermError(_)))
+    {
+        "permerror"
+    } else if results
+        .iter()
+        .any(|o| matches!(o.result(), DkimResult::Neutral(_)))
+    {
+        "neutral"
+    } else {
+        "none"
     }
 }
 
@@ -252,4 +293,37 @@ pub fn sign_dkim2_for_delivery(
     out.extend_from_slice(signed.to_header().as_bytes());
     out.extend_from_slice(message);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use mail_auth::{DkimOutput, Error as MailAuthError};
+
+    use super::dkim1_result_str;
+
+    #[test]
+    fn pass_wins_even_alongside_a_failing_signature() {
+        let results = vec![
+            DkimOutput::fail(MailAuthError::NotAligned),
+            DkimOutput::pass(),
+        ];
+        assert_eq!(dkim1_result_str(&results), "pass");
+    }
+
+    #[test]
+    fn no_signature_at_all_is_none() {
+        assert_eq!(dkim1_result_str(&[]), "none");
+    }
+
+    #[test]
+    fn a_single_failing_signature_is_fail() {
+        let results = vec![DkimOutput::fail(MailAuthError::NotAligned)];
+        assert_eq!(dkim1_result_str(&results), "fail");
+    }
+
+    #[test]
+    fn temporary_dns_errors_are_reported_as_temperror() {
+        let results = vec![DkimOutput::temp_err(MailAuthError::NotAligned)];
+        assert_eq!(dkim1_result_str(&results), "temperror");
+    }
 }
