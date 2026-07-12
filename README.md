@@ -400,12 +400,22 @@ Deferred / ideas:
 - add CI, including [REUSE](https://reuse.software/) license-compliance checking (`reuse lint`)
   to keep licensing machine-readable and consistent (esp. given the MPL-2.0 project vs the
   AGPL-3.0 `sieve-rs` dependency)
+- Add Markdown formatter/linter for README
 - actually *handle* one-click unsubscribe (RFC 8058), not just advertise it: carriers emits
   `List-Unsubscribe`/`List-Unsubscribe-Post` today, but processing the click is left entirely
   to whatever `unsubscribe_oneclick` URL the admin points at. Implement it end to end via
   either a `mailto:` target carriers listens on itself, or a minimal HTTP endpoint that accepts
   the RFC 8058 POST — routed through `MemberProvider` (an `unsubscribe`-style method) so it
   works uniformly against SQLite today and a future pull-based provider without special-casing
+- `carriers genkey` should output zone file and not some binary jumbled mess
+- Support libeconf/UAPI style configuration (merging, overwriting, drop-ins etc)
+- Ensure we do not provide an "open relay" where posters can send unauthenticated (no DMARC, or failure) messages which we then sign with our reputation.
+  This means checking incoming DMARC/SPF/DKIM results and rejecting DMARC failures of incoming mails.
+  For mails without DMARC/DKIM/SPF configured we similarly must never add our own DKIM signature!
+- Instead of manually specifying the drop-in directories for per-domain policies, just build a reverse domain
+  from the directory paths, e.g. `policies/com/example/lists.d/` for `lists.example.com`.
+  This is more intuitive and allows for a more natural directory structure, e.g. `policies/com/example/global-before.d/` for
+  instance-wide before scripts for `example.com` and all subdomains.
 
 ## License
 
