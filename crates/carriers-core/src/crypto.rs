@@ -10,7 +10,7 @@ use crate::list::{Algorithm, KeyConfig};
 /// [`mail_auth::dkim::DkimSigner`] and [`mail_auth::arc::ArcSealer`].
 ///
 /// Keys are read as raw DER, not PEM: RSA keys as PKCS#8 or PKCS#1, Ed25519 keys as PKCS#8.
-/// `carriers genkey` writes keys in this format.
+/// `carriers setup` writes keys in this format.
 pub fn load_dkim_key(cfg: &KeyConfig) -> Result<DkimKey> {
     let der = std::fs::read(&cfg.key_file)
         .map_err(|e| Error::Key(format!("reading {}: {e}", cfg.key_file.display())))?;

@@ -94,11 +94,13 @@ The workspace is split into `carriers-core` (the message pipeline, no network) a
 ## Quick start
 
 ```sh
-# 1. Generate DKIM and ARC keys for the list domain (also writes a DNS zone-file snippet to publish).
-carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.der --zone-out /etc/carriers/keys/dev.dkim.zone
-carriers genkey --algorithm ed25519 --selector arc  --domain lists.example.org --out /etc/carriers/keys/dev.arc.der  --zone-out /etc/carriers/keys/dev.arc.zone
+# 1. Generate DKIM/ARC/DKIM2 keys for the list domain and one DNS zone file covering everything
+#    it needs to publish (DKIM, DKIM2, SPF, ARC, DMARC, plus a PTR reminder).
+carriers setup lists.example.org --algorithm ed25519 --spf-ip <smarthost-ip> \
+    --dmarc-rua dmarc@lists.example.org --out-dir /etc/carriers/keys/dev
 
-# 2. Write config and a list definition (see examples/).
+# 2. Write config and a list definition (see examples/) — `carriers setup` prints a ready-to-paste
+#    [dkim]/[arc]/[dkim2] snippet pointing at the keys it just wrote.
 cp examples/carriers.toml   /etc/carriers/carriers.toml
 cp examples/lists/dev.toml  /etc/carriers/lists/dev.toml
 
@@ -138,19 +140,22 @@ the service). Running `carriers run` directly (without systemd) simply binds `li
 
 ## DNS you must publish
 
-For the **list domain** (e.g. `lists.example.org`):
+`carriers setup <domain>` writes a single zone file (`<domain>.zone` by default) covering
+everything the **list domain** needs:
 
-- **DKIM**: the zone file `carriers genkey` writes (`<dkim-selector>.zone` by default), for
-  `<dkim-selector>._domainkey.<list-domain>`.
-- **ARC**: likewise, `carriers genkey`'s zone file for `<arc-selector>._domainkey.<list-domain>`.
-- **DKIM2** (only if you've configured `[dkim2]` — see "DKIM2 support"): the same, for
-  `<dkim2-selector>._domainkey.<list-domain>` (same record shape as DKIM).
-- **SPF**: authorize your smarthost to send for the list domain, e.g.
-  `v=spf1 ip4:<smarthost-ip> -all`.
-- **DMARC**: e.g. `v=DMARC1; p=quarantine; rua=mailto:dmarc@lists.example.org`.
+- **DKIM**, at `<dkim-selector>._domainkey.<list-domain>`.
+- **ARC**, at `<arc-selector>._domainkey.<list-domain>`.
+- **DKIM2** (see "DKIM2 support" — pass `--no-dkim2` to skip it if you don't plan to configure
+  `[dkim2]`), at `<dkim2-selector>._domainkey.<list-domain>` (same record shape as DKIM).
+- **SPF**, from any `--spf-ip` addresses given (repeat the flag for multiple smarthosts/IPv4+IPv6);
+  without one, the zone file leaves a placeholder line to fill in.
+- **DMARC**, from `--dmarc-policy` (default `quarantine`) and an optional `--dmarc-rua`.
+- A **PTR reminder**: reverse DNS for your smarthost's IP lives in that IP's own zone
+  (`in-addr.arpa`/`ip6.arpa`), controlled by whoever assigns you the address — not something this
+  domain's zone file can publish. The generated file includes a comment with what to ask for.
 
-The RSA `p=` value is emitted as X.509 SubjectPublicKeyInfo (SPKI), the form Google/Microsoft
-expect.
+Publish the file via `$INCLUDE`, or paste its records into your DNS provider's UI. The RSA `p=`
+value is emitted as X.509 SubjectPublicKeyInfo (SPKI), the form Google/Microsoft expect.
 
 ## Posting policy and moderation
 
@@ -375,7 +380,7 @@ address is disabled — it is skipped as a recipient — until an operator runs
 | Command | Description |
 | --- | --- |
 | `carriers run` | Run the ingress listener and distribute posts. |
-| `carriers genkey` | Generate a DKIM/ARC/DKIM2 key pair, writing the private key and a DNS zone-file snippet to files. |
+| `carriers setup <domain>` | Generate DKIM/ARC/DKIM2 keys and one DNS zone file with everything a list domain needs to publish (DKIM, DKIM2, SPF, ARC, DMARC, plus a PTR reminder). |
 | `carriers member add\|remove\|list\|enable <list> [address] [--poster] [--no-subscribe] [--moderator]` | Manage members; `enable` clears bounce state. |
 | `carriers moderate list\|show\|approve\|reject [id]` | Review and act on held messages. |
 | `carriers policies` | List the compiled Sieve moderation policies. |

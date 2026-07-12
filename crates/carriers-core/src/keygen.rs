@@ -1,4 +1,4 @@
-//! DKIM/ARC key generation for the `carriers genkey` command.
+//! DKIM/ARC/DKIM2 key generation for the `carriers setup` command.
 //!
 //! Keys are generated with mail-auth's generator. For RSA, the public key is re-encoded as
 //! X.509 `SubjectPublicKeyInfo` (SPKI) before base64 — that is the form Google, Microsoft and

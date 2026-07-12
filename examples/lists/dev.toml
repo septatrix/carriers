@@ -34,16 +34,25 @@ policy = "subscribers"
 # `carriers sync`.
 # members_file = "/var/lib/carriers/lists/dev/members"
 
-# DKIM signing key for the list domain. Generate with:
-#   carriers genkey --algorithm ed25519 --selector dkim --domain lists.example.org --out /etc/carriers/keys/dev.dkim.der
+# DKIM signing key for the list domain. `carriers setup lists.example.org --algorithm ed25519
+# --out-dir /etc/carriers/keys/dev` generates this (and the [arc]/[dkim2] keys below, plus the
+# DNS zone file to publish) in one go — use a distinct --out-dir per list to keep selectors from
+# colliding.
 [dkim]
 selector = "dkim"
-key_file = "/etc/carriers/keys/dev.dkim.der"
+key_file = "/etc/carriers/keys/dev/dkim.der"
 algorithm = "ed25519" # or "rsa"
 # domain = "lists.example.org"  # defaults to the posting address domain
 
 # ARC sealing key. Use a distinct selector from DKIM.
 [arc]
 selector = "arc"
-key_file = "/etc/carriers/keys/dev.arc.der"
+key_file = "/etc/carriers/keys/dev/arc.der"
 algorithm = "ed25519"
+
+# Opt-in DKIM2 signing (draft-ietf-dkim-dkim2-spec — see "DKIM2 support" in the README). Adds a
+# per-recipient DKIM2 chain link alongside (not instead of) the [dkim]/[arc] above.
+# [dkim2]
+# selector = "dkim2"
+# key_file = "/etc/carriers/keys/dev/dkim2.der"
+# algorithm = "ed25519"

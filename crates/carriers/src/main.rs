@@ -52,8 +52,9 @@ struct Cli {
 enum Command {
     /// Run the ingress listener and distribute incoming posts.
     Run,
-    /// Generate a DKIM/ARC key pair and print the DNS record to publish.
-    Genkey(GenkeyArgs),
+    /// Generate DKIM/ARC/DKIM2 keys and one DNS zone file covering everything a list domain
+    /// needs to publish (DKIM, DKIM2, SPF, ARC, DMARC, plus a PTR reminder).
+    Setup(SetupArgs),
     /// Import the flat member seed file(s) into the database.
     Sync,
     /// Manage subscribers and members.
@@ -67,28 +68,42 @@ enum Command {
 }
 
 #[derive(Args)]
-struct GenkeyArgs {
-    /// Key algorithm.
+struct SetupArgs {
+    /// The list domain, e.g. `lists.example.org`.
+    domain: String,
+    /// Key algorithm, applied to all generated keys.
     #[arg(long, value_enum, default_value_t = KeyAlg::Rsa)]
     algorithm: KeyAlg,
     /// RSA key size in bits (ignored for ed25519).
     #[arg(long, default_value_t = 2048)]
     bits: usize,
-    /// DNS selector the record will be published under (also used to name the output files).
-    #[arg(long, default_value = "carriers")]
-    selector: String,
-    /// Signing domain (for the printed record name).
-    #[arg(long, default_value = "example.org")]
-    domain: String,
-    /// Write the raw DER-encoded private key here. Defaults to `<selector>.der` in the current
-    /// directory.
+    /// DKIM selector.
+    #[arg(long, default_value = "dkim")]
+    selector_dkim: String,
+    /// ARC selector.
+    #[arg(long, default_value = "arc")]
+    selector_arc: String,
+    /// DKIM2 selector (draft-ietf-dkim-dkim2-spec).
+    #[arg(long, default_value = "dkim2")]
+    selector_dkim2: String,
+    /// Skip generating a DKIM2 key. DKIM2 signing is itself opt-in per list (see `[dkim2]` in
+    /// the list config), so this only saves generating a key you don't plan to use yet.
     #[arg(long)]
-    out: Option<PathBuf>,
-    /// Write the DNS zone-file snippet here. Defaults to `<selector>.zone` in the current
-    /// directory.
+    no_dkim2: bool,
+    /// Smarthost IP address to authorize in the SPF record (repeatable for multiple
+    /// smarthosts/IPv4+IPv6). Omit to leave a placeholder in the zone file instead.
+    #[arg(long = "spf-ip")]
+    spf_ip: Vec<String>,
+    /// DMARC policy (`none`, `quarantine`, or `reject`).
+    #[arg(long, default_value = "quarantine")]
+    dmarc_policy: String,
+    /// DMARC aggregate-report address, e.g. `dmarc@lists.example.org`.
     #[arg(long)]
-    zone_out: Option<PathBuf>,
-    /// Overwrite `--out`/`--zone-out` if they already exist.
+    dmarc_rua: Option<String>,
+    /// Directory to write the keys and zone file into.
+    #[arg(long, default_value = ".")]
+    out_dir: PathBuf,
+    /// Overwrite output files if they already exist.
     #[arg(long)]
     force: bool,
 }
@@ -159,7 +174,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run => run(&cli.config).await,
-        Command::Genkey(args) => genkey(args),
+        Command::Setup(args) => setup(args),
         Command::Sync => sync(&cli.config).await,
         Command::Member(cmd) => member(&cli.config, cmd).await,
         Command::Moderate(cmd) => moderate(&cli.config, cmd).await,
@@ -174,18 +189,39 @@ async fn run(config_path: &Path) -> Result<()> {
     smtp::serve(state).await
 }
 
-fn genkey(args: GenkeyArgs) -> Result<()> {
-    let out = args
-        .out
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(format!("{}.der", args.selector)));
-    let zone_out = args
-        .zone_out
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(format!("{}.zone", args.selector)));
+/// One generated key, remembered alongside the file it was written to and the label used in the
+/// zone file's comments.
+struct SetupKey {
+    label: &'static str,
+    selector: String,
+    path: PathBuf,
+    dns_txt: String,
+}
+
+fn setup(args: SetupArgs) -> Result<()> {
+    if !["none", "quarantine", "reject"].contains(&args.dmarc_policy.as_str()) {
+        bail!(
+            "--dmarc-policy must be one of `none`, `quarantine`, `reject` (got `{}`)",
+            args.dmarc_policy
+        );
+    }
+
+    std::fs::create_dir_all(&args.out_dir)
+        .with_context(|| format!("creating output directory {}", args.out_dir.display()))?;
+    let zone_path = args.out_dir.join(format!("{}.zone", args.domain));
+
+    let mut selectors: Vec<(&'static str, &str)> =
+        vec![("DKIM", &args.selector_dkim), ("ARC", &args.selector_arc)];
+    if !args.no_dkim2 {
+        selectors.push(("DKIM2", &args.selector_dkim2));
+    }
+    let key_paths: Vec<PathBuf> = selectors
+        .iter()
+        .map(|(_, selector)| args.out_dir.join(format!("{selector}.der")))
+        .collect();
 
     if !args.force {
-        for path in [&out, &zone_out] {
+        for path in key_paths.iter().chain([&zone_path]) {
             if path.exists() {
                 bail!(
                     "{} already exists (pass --force to overwrite)",
@@ -195,36 +231,124 @@ fn genkey(args: GenkeyArgs) -> Result<()> {
         }
     }
 
-    let key = keygen::generate(args.algorithm.into(), args.bits)?;
+    let mut keys = Vec::with_capacity(selectors.len());
+    for ((label, selector), path) in selectors.into_iter().zip(key_paths) {
+        let generated = keygen::generate(args.algorithm.into(), args.bits)?;
+        std::fs::write(&path, &generated.private_der)
+            .with_context(|| format!("writing {label} private key to {}", path.display()))?;
+        keys.push(SetupKey {
+            label,
+            selector: selector.to_string(),
+            path,
+            dns_txt: generated.dns_txt,
+        });
+    }
 
-    std::fs::write(&out, &key.private_der)
-        .with_context(|| format!("writing private key to {}", out.display()))?;
+    let zone = setup_zone(&args, &keys);
+    std::fs::write(&zone_path, zone)
+        .with_context(|| format!("writing zone file to {}", zone_path.display()))?;
 
-    let zone = zone_snippet(&args.selector, &args.domain, &key.dns_txt);
-    std::fs::write(&zone_out, zone)
-        .with_context(|| format!("writing zone file to {}", zone_out.display()))?;
-
-    println!("Private key written to {}", out.display());
-    println!("DNS zone file written to {}", zone_out.display());
+    println!("Generated keys for {}:", args.domain);
+    for key in &keys {
+        println!("  {:<6} {}", key.label, key.path.display());
+    }
+    println!("DNS zone file written to {}", zone_path.display());
     println!();
     println!(
-        "Publish it for {}: append {} to your zone (or a $INCLUDE), or paste its record into",
-        args.domain,
-        zone_out.display()
+        "Publish it: append {} to your zone (or a $INCLUDE), or paste its records into your DNS",
+        zone_path.display()
     );
-    println!("your DNS provider's UI.");
+    println!("provider's UI. It also has a reminder about the PTR record your host controls.");
+    println!();
+    println!(
+        "List config ([dkim]/[arc]{}):",
+        if args.no_dkim2 { "" } else { "/[dkim2]" }
+    );
+    for key in &keys {
+        println!(
+            "[{}]\nselector = \"{}\"\nkey_file = \"{}\"\nalgorithm = \"{}\"\n",
+            key.label.to_lowercase(),
+            key.selector,
+            key.path.display(),
+            match args.algorithm {
+                KeyAlg::Rsa => "rsa",
+                KeyAlg::Ed25519 => "ed25519",
+            },
+        );
+    }
     Ok(())
 }
 
-/// A DNS zone-file-syntax snippet for one DKIM/ARC/DKIM2 public key record, ready to append to a
-/// zone file or hand to a DNS provider. Not a complete zone (no SOA/NS) — just this one record.
-fn zone_snippet(selector: &str, domain: &str, dns_txt: &str) -> String {
+/// The full DNS zone-file content for a list domain: DKIM/ARC/DKIM2 public keys, SPF, DMARC, and
+/// an advisory PTR reminder. Not a complete zone (no SOA/NS) — records only, meant to be appended
+/// to an existing zone or pasted into a DNS provider's UI.
+fn setup_zone(args: &SetupArgs, keys: &[SetupKey]) -> String {
     let mut out = format!(
-        "; DKIM/ARC/DKIM2 public key, generated by `carriers genkey`.\n\
-         ; Publish this record for {domain} (e.g. via $INCLUDE, or paste into your DNS provider).\n\
-         {selector}._domainkey.{domain}. IN TXT (\n"
+        "; DNS records for {domain}, generated by `carriers setup`.\n\
+         ; Publish these via $INCLUDE, or paste them into your DNS provider's UI.\n\n",
+        domain = args.domain
     );
-    for chunk in split_txt(dns_txt) {
+
+    for key in keys {
+        out.push_str(&format!("; {} public key\n", key.label));
+        out.push_str(&txt_record(
+            &format!("{}._domainkey.{}", key.selector, args.domain),
+            &key.dns_txt,
+        ));
+        out.push('\n');
+    }
+
+    out.push_str("; SPF - authorize the IP address(es) your smarthost sends from\n");
+    if args.spf_ip.is_empty() {
+        out.push_str(&format!(
+            "; no --spf-ip given; fill in your smarthost's address(es), e.g.:\n\
+             ; {domain}. IN TXT \"v=spf1 ip4:203.0.113.1 -all\"\n\n",
+            domain = args.domain
+        ));
+    } else {
+        let mechanisms: Vec<String> = args
+            .spf_ip
+            .iter()
+            .map(|ip| {
+                let kind = if ip.contains(':') { "ip6" } else { "ip4" };
+                format!("{kind}:{ip}")
+            })
+            .collect();
+        out.push_str(&txt_record(
+            &args.domain,
+            &format!("v=spf1 {} -all", mechanisms.join(" ")),
+        ));
+        out.push('\n');
+    }
+
+    out.push_str("; DMARC\n");
+    let rua_tag = args
+        .dmarc_rua
+        .as_ref()
+        .map(|rua| format!("; rua=mailto:{rua}"))
+        .unwrap_or_default();
+    out.push_str(&txt_record(
+        &format!("_dmarc.{}", args.domain),
+        &format!("v=DMARC1; p={}{rua_tag}", args.dmarc_policy),
+    ));
+    out.push('\n');
+
+    out.push_str(
+        "; PTR - reverse DNS for your smarthost's IP address(es). This cannot be published\n\
+         ; from this zone: a PTR record lives in the IP's own reverse-DNS zone\n\
+         ; (in-addr.arpa/ip6.arpa), controlled by whoever assigns you that IP address (your\n\
+         ; hosting provider or ISP), not by this domain's zone. Ask them to point it at your\n\
+         ; smarthost's HELO/EHLO name, which most receivers expect to match.\n",
+    );
+
+    out
+}
+
+/// One DNS zone-file-syntax TXT record, `<name>. IN TXT ( "chunk" "chunk" )`, chunked to the
+/// 255-octet limit for a single TXT string.
+fn txt_record(name: &str, value: &str) -> String {
+    let mut out = format!("{name}. IN TXT (\n");
+    for chunk in split_txt(value) {
         out.push_str(&format!("    \"{chunk}\"\n"));
     }
     out.push_str(")\n");
