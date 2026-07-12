@@ -16,6 +16,7 @@ pub const ALL: &[&str] = &[
     "dmarc-reject-spoofed",
     "dmarc-none-no-signature",
     "dkim2-signing",
+    "dkim2-not-originated",
 ];
 
 /// Run one scenario by name; returns whether every assertion held. Details are printed.
@@ -27,6 +28,7 @@ pub async fn run(name: &str) -> Result<bool> {
         "dmarc-reject-spoofed" => dmarc_reject_spoofed().await,
         "dmarc-none-no-signature" => dmarc_none_no_signature().await,
         "dkim2-signing" => dkim2_signing().await,
+        "dkim2-not-originated" => dkim2_not_originated().await,
         other => bail!("unknown scenario `{other}` (known: {})", ALL.join(", ")),
     }
 }
@@ -38,7 +40,6 @@ async fn author_signed_preject() -> Result<bool> {
     let h = Harness::start(HarnessOpts {
         author_dmarc_policy: "reject".to_string(),
         print_verdicts: false,
-        ..Default::default()
     })
     .await?;
 
@@ -70,7 +71,6 @@ async fn no_dkim() -> Result<bool> {
     let h = Harness::start(HarnessOpts {
         author_dmarc_policy: "reject".to_string(),
         print_verdicts: false,
-        ..Default::default()
     })
     .await?;
 
@@ -104,7 +104,6 @@ async fn replay_eml() -> Result<bool> {
     let h = Harness::start(HarnessOpts {
         author_dmarc_policy: "none".to_string(),
         print_verdicts: false,
-        ..Default::default()
     })
     .await?;
 
@@ -205,19 +204,23 @@ async fn dmarc_none_no_signature() -> Result<bool> {
     )
 }
 
-/// A list with an opt-in `[dkim2]` key configured (draft-ietf-dkim-dkim2-spec). DKIM2 binds the
-/// exact SMTP envelope, so carriers adds the chain link once per delivery, matching each
-/// subscriber's own VERP return path — the sink verifies it against the real envelope it received
-/// the copy under.
+/// An inbound message that already participates in a DKIM2 chain (draft-ietf-dkim-dkim2-spec) —
+/// as if a gateway ahead of the list added the origination link. carriers only ever *extends* an
+/// existing DKIM2 chain, never starts one of its own (see `sign::should_sign_dkim2`), so this is
+/// the one case where the list adds its own link at all. DKIM2 binds the exact SMTP envelope, so
+/// that link is added once per delivery, matching each subscriber's own VERP return path — the
+/// sink verifies it against the real envelope it received the copy under.
 async fn dkim2_signing() -> Result<bool> {
-    let h = Harness::start(HarnessOpts {
-        list_dkim2: true,
-        ..Default::default()
-    })
-    .await?;
+    let h = Harness::start(HarnessOpts::default()).await?;
 
     let raw = sender::build(&draft("Hello list (DKIM2)"));
-    let verdict = send_and_score(&h, &raw).await?;
+    let dkim2_signed = sender::sign_as_author_dkim2(
+        &raw,
+        &h.author_dkim2,
+        harness::AUTHOR_FROM,
+        harness::POSTING_ADDRESS,
+    )?;
+    let verdict = send_and_score(&h, &dkim2_signed).await?;
 
     report(
         "dkim2-signing",
@@ -230,10 +233,35 @@ async fn dkim2_signing() -> Result<bool> {
             ),
             check("ARC cv=pass", verdict.arc_pass, true),
             check(
-                "DKIM2 chain valid against the delivery envelope",
+                "DKIM2 chain extended and valid against the delivery envelope",
                 verdict.dkim2_pass,
                 true,
             ),
+        ],
+    )
+}
+
+/// The ordinary case: a plain message with no DKIM2 signature of its own. carriers never
+/// originates a DKIM2 chain — only extends one that was already there (see `dkim2-signing`) — so
+/// the delivered copy must not carry one either, even though the list has a `[dkim2]` key
+/// configured (every list does, the same as `[dkim]`/`[arc]`).
+async fn dkim2_not_originated() -> Result<bool> {
+    let h = Harness::start(HarnessOpts::default()).await?;
+
+    let raw = sender::build(&draft("Hello list (no DKIM2)"));
+    let verdict = send_and_score(&h, &raw).await?;
+
+    report(
+        "dkim2-not-originated",
+        &verdict,
+        &[
+            check(
+                "list DKIM valid",
+                verdict.dkim_pass_for(harness::LIST_DOMAIN),
+                true,
+            ),
+            check("ARC cv=pass", verdict.arc_pass, true),
+            check("no DKIM2 chain originated", verdict.dkim2_pass, false),
         ],
     )
 }

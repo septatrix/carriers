@@ -145,8 +145,8 @@ everything the **list domain** needs:
 
 - **DKIM**, at `<dkim-selector>._domainkey.<list-domain>`.
 - **ARC**, at `<arc-selector>._domainkey.<list-domain>`.
-- **DKIM2** (see "DKIM2 support" — pass `--no-dkim2` to skip it if you don't plan to configure
-  `[dkim2]`), at `<dkim2-selector>._domainkey.<list-domain>` (same record shape as DKIM).
+- **DKIM2** (see "DKIM2 support" — every list needs this key, the same as DKIM/ARC), at
+  `<dkim2-selector>._domainkey.<list-domain>` (same record shape as DKIM).
 - **SPF**, from any `--spf-ip` addresses given (repeat the flag for multiple smarthosts/IPv4+IPv6);
   without one, the zone file leaves a placeholder line to fill in.
 - **DMARC**, from `--dmarc-policy` (default `quarantine`) and an optional `--dmarc-rua`.
@@ -286,7 +286,7 @@ custom script that wants it today.
 
 ### DKIM2 support
 
-carriers optionally verifies and signs with **DKIM2**
+carriers verifies and signs with **DKIM2**
 ([draft-ietf-dkim-dkim2-spec](https://datatracker.ietf.org/doc/html/draft-ietf-dkim-dkim2-spec)),
 an emerging IETF successor to classic DKIM and ARC that chains signatures across hops while
 binding the exact SMTP envelope at each one:
@@ -294,16 +294,19 @@ binding the exact SMTP envelope at each one:
 - **Verification** always runs on inbound mail (no config needed): if a message carries a DKIM2
   chain, it's checked alongside classic DKIM/SPF/DMARC, and a passing, aligned chain counts as a
   DMARC DKIM-alignment pass just like classic DKIM would (see `vnd.carriers.dkim2_result` above).
-- **Signing** is opt-in per list: add a `[dkim2]` key section (same shape as `[dkim]`/`[arc]`) to
-  the list's TOML file. Because DKIM2's envelope binding must exactly match the real delivery
+- **Signing is not a config choice** — every list has a `[dkim2]` key configured, the same as
+  `[dkim]`/`[arc]` (`carriers setup` always generates it). Whether it's actually used is decided
+  per message: carriers only ever **extends** a DKIM2 chain the inbound message already carried
+  (`vnd.carriers.dkim2_result` was anything other than `none`); it never originates one of its
+  own. Most inbound mail today has no DKIM2 signature at all, so the key simply goes unused for
+  it — that's expected, not a misconfiguration.
+- When it does apply, because DKIM2's envelope binding must exactly match the real delivery
   envelope — unlike ARC/classic DKIM, which sign once for every recipient — carriers adds the
   list's DKIM2 chain link **once per recipient**, at actual delivery time, bound to that
   subscriber's own VERP return path. Everything else (ARC seal, classic DKIM signature, List
   headers) is still computed once and shared across all copies.
 - The `no-dkim` pseudo-mailbox (see above) withholds the DKIM2 chain link too, not just the
   classic DKIM signature.
-
-Since the underlying draft isn't yet finalized, DKIM2 signing is off unless explicitly configured.
 
 ### Global policy
 
@@ -426,9 +429,12 @@ the list's own DKIM + ARC are valid), `replay-eml` (an existing message from
 claiming a `p=reject` domain with no valid authentication at all — the built-in DMARC gate must
 reject it at the SMTP level, before it can be signed and relayed with the list's reputation), and
 `dmarc-none-no-signature` (a domain with no DMARC/DKIM/SPF configured — the message is still
-distributed, but the delivered copy must carry no list DKIM signature, only the ARC seal), and
-`dkim2-signing` (a list with `[dkim2]` configured — the delivered copy's DKIM2 chain link must
-verify against the exact per-recipient VERP delivery envelope it was signed with).
+distributed, but the delivered copy must carry no list DKIM signature, only the ARC seal),
+`dkim2-signing` (an inbound message that already carries a DKIM2 signature — the list extends the
+chain, and the delivered copy's DKIM2 link must verify against the exact per-recipient VERP
+delivery envelope it was signed with), and `dkim2-not-originated` (an ordinary message with no
+DKIM2 signature of its own — the list must *not* originate a chain, even though it has a `[dkim2]`
+key configured).
 
 For interactive poking, bring the stack up and drive it by hand:
 
@@ -451,8 +457,8 @@ per-domain Sieve `.d` drop-in directories wrapped before/after every list's own 
 unauthenticated mail against an enforcing domain and withholds the list's own DKIM signature
 otherwise (see "DMARC enforcement gate" above), an available From/Reply-To munging mechanism
 (`fileinto "munge-from"`), VERP bounce processing with automatic delivery disabling, loop and
-duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, opt-in DKIM2
-verification/signing (see "DKIM2 support"), smarthost delivery, flat-file lists + SQLite
+duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, DKIM2
+verification/chain-extension (see "DKIM2 support"), smarthost delivery, flat-file lists + SQLite
 membership (independent subscriber, poster and moderator roles), key generation, and an
 in-process end-to-end test harness (`carriers-testkit`) with mock DNS + a scoring SMTP sink.
 

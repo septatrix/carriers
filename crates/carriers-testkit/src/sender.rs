@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use mail_auth::common::headers::HeaderWriter;
 use mail_auth::dkim::DkimSigner;
+use mail_auth::dkim2::{Dkim2Signer, Hop};
 use mail_send::SmtpClientBuilder;
 use mail_send::smtp::message::Message;
 
@@ -109,6 +110,38 @@ pub fn sign_as_author(raw: &[u8], key: &AuthorKey) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("author DKIM signing failed: {e}"))?;
 
     let mut out = signature.to_header().into_bytes();
+    out.extend_from_slice(raw);
+    Ok(out)
+}
+
+/// Prepend an author DKIM2 chain link to `raw`, simulating a message that already participates
+/// in a DKIM2 chain (draft-ietf-dkim-dkim2-spec) before it ever reaches the list — this is the
+/// only case in which carriers itself will extend the chain further (see
+/// `carriers_core::sign::should_sign_dkim2`). `mail_from`/`rcpt_to` are the envelope this
+/// origination hop binds to (the author's own submission envelope, not the list's).
+pub fn sign_as_author_dkim2(
+    raw: &[u8],
+    key: &AuthorKey,
+    mail_from: &str,
+    rcpt_to: &str,
+) -> Result<Vec<u8>> {
+    let dkim_key = load_dkim_key(&KeyConfig {
+        selector: key.selector.clone(),
+        key_file: key.key_file.clone(),
+        algorithm: key.algorithm,
+        domain: Some(key.domain.clone()),
+    })
+    .context("loading author DKIM2 key")?;
+
+    let signer = Dkim2Signer::from_key(dkim_key)
+        .domain(key.domain.clone())
+        .selector(key.selector.clone());
+
+    let signed = signer
+        .sign(raw, Hop::real(mail_from, [rcpt_to]))
+        .map_err(|e| anyhow::anyhow!("author DKIM2 signing failed: {e}"))?;
+
+    let mut out = signed.to_header().into_bytes();
     out.extend_from_slice(raw);
     Ok(out)
 }

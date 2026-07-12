@@ -83,13 +83,10 @@ struct SetupArgs {
     /// ARC selector.
     #[arg(long, default_value = "arc")]
     selector_arc: String,
-    /// DKIM2 selector (draft-ietf-dkim-dkim2-spec).
+    /// DKIM2 selector (draft-ietf-dkim-dkim2-spec). Every list needs one, like DKIM/ARC — whether
+    /// it's ever used to sign depends on the inbound message, not on config.
     #[arg(long, default_value = "dkim2")]
     selector_dkim2: String,
-    /// Skip generating a DKIM2 key. DKIM2 signing is itself opt-in per list (see `[dkim2]` in
-    /// the list config), so this only saves generating a key you don't plan to use yet.
-    #[arg(long)]
-    no_dkim2: bool,
     /// Smarthost IP address to authorize in the SPF record (repeatable for multiple
     /// smarthosts/IPv4+IPv6). Omit to leave a placeholder in the zone file instead.
     #[arg(long = "spf-ip")]
@@ -210,11 +207,11 @@ fn setup(args: SetupArgs) -> Result<()> {
         .with_context(|| format!("creating output directory {}", args.out_dir.display()))?;
     let zone_path = args.out_dir.join(format!("{}.zone", args.domain));
 
-    let mut selectors: Vec<(&'static str, &str)> =
-        vec![("DKIM", &args.selector_dkim), ("ARC", &args.selector_arc)];
-    if !args.no_dkim2 {
-        selectors.push(("DKIM2", &args.selector_dkim2));
-    }
+    let selectors: Vec<(&'static str, &str)> = vec![
+        ("DKIM", &args.selector_dkim),
+        ("ARC", &args.selector_arc),
+        ("DKIM2", &args.selector_dkim2),
+    ];
     let key_paths: Vec<PathBuf> = selectors
         .iter()
         .map(|(_, selector)| args.out_dir.join(format!("{selector}.der")))
@@ -260,10 +257,7 @@ fn setup(args: SetupArgs) -> Result<()> {
     );
     println!("provider's UI. It also has a reminder about the PTR record your host controls.");
     println!();
-    println!(
-        "List config ([dkim]/[arc]{}):",
-        if args.no_dkim2 { "" } else { "/[dkim2]" }
-    );
+    println!("List config ([dkim]/[arc]/[dkim2]):");
     for key in &keys {
         println!(
             "[{}]\nselector = \"{}\"\nkey_file = \"{}\"\nalgorithm = \"{}\"\n",

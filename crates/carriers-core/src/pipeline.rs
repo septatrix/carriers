@@ -27,12 +27,13 @@ pub struct Prepared {
     pub return_path_local: String,
     /// List domain, used to build the VERP return path.
     pub list_domain: String,
-    /// The pristine inbound message, present only when the list has a `[dkim2]` key configured
-    /// and no policy tier withheld the list's own signature. DKIM2 binds the exact SMTP envelope,
-    /// which — unlike ARC/classic DKIM — differs per recipient here (VERP), so the list's DKIM2
-    /// chain link can't be added to the shared `message` above; the caller must add one per
-    /// recipient at actual delivery time instead, via
-    /// [`crate::sign::sign_dkim2_for_delivery`], using this as the diff baseline.
+    /// The pristine inbound message, present only when [`crate::sign::should_sign_dkim2`] says
+    /// the list should extend the inbound message's own DKIM2 chain (never originate one) and no
+    /// policy tier withheld the list's own signature. DKIM2 binds the exact SMTP envelope, which
+    /// — unlike ARC/classic DKIM — differs per recipient here (VERP), so the list's DKIM2 chain
+    /// link can't be added to the shared `message` above; the caller must add one per recipient
+    /// at actual delivery time instead, via [`crate::sign::sign_dkim2_for_delivery`], using this
+    /// as the diff baseline.
     pub dkim2_original: Option<Vec<u8>>,
 }
 
@@ -350,8 +351,10 @@ pub async fn finalize(
 
             // DKIM2's exact envelope-match requirement means its chain link can't be added here
             // (this `message` is shared, unsigned-per-recipient); the caller adds it per delivery
-            // instead (see `Prepared::dkim2_original`'s docs).
-            let dkim2_original = (!outcome.no_own_dkim && list.dkim2_signer().is_some())
+            // instead (see `Prepared::dkim2_original`'s docs). Whether to extend the chain at all
+            // depends only on whether the inbound message already carried one — see
+            // `sign::should_sign_dkim2`.
+            let dkim2_original = sign::should_sign_dkim2(&verdict, outcome.no_own_dkim)
                 .then(|| original_raw.to_vec());
 
             let return_path_local = list

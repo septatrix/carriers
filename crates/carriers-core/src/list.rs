@@ -78,12 +78,11 @@ pub struct ListConfig {
     pub dkim: KeyConfig,
     /// ARC sealing key for the list domain.
     pub arc: KeyConfig,
-    /// Opt-in DKIM2 signing key for the list domain (draft-ietf-dkim-dkim2-spec). When set, the
-    /// list additionally adds a DKIM2 chain link to outbound mail, alongside (not instead of) its
-    /// classic DKIM signature and ARC seal. Unset by default, since the underlying IETF draft is
-    /// not yet finalized.
-    #[serde(default)]
-    pub dkim2: Option<KeyConfig>,
+    /// DKIM2 signing key for the list domain (draft-ietf-dkim-dkim2-spec), configured like
+    /// `dkim`/`arc` above. Whether it is actually used is not a config choice: carriers only ever
+    /// extends a DKIM2 chain the inbound message already carried, never originates one — see
+    /// `sign::should_sign_dkim2`.
+    pub dkim2: KeyConfig,
 
     /// The moderation policy: either a built-in name (see [`crate::policy`]) or the name of a
     /// custom `<name>.sieve` file in `policies_dir`. Built-in and custom policies are compiled
@@ -130,8 +129,7 @@ pub struct List {
     pub domain: String,
     signer: DkimSigner<DkimKey, Done>,
     sealer: ArcSealer<DkimKey, Done>,
-    /// The DKIM2 signer, if `[dkim2]` is configured.
-    dkim2_signer: Option<Dkim2Signer<Dkim2Done>>,
+    dkim2_signer: Dkim2Signer<Dkim2Done>,
 }
 
 impl List {
@@ -163,15 +161,9 @@ impl List {
             .selector(cfg.arc.selector.clone())
             .headers(SIGNED_HEADERS.iter().map(|s| s.to_string()));
 
-        let dkim2_signer = cfg
-            .dkim2
-            .as_ref()
-            .map(|dkim2_cfg| -> Result<_> {
-                Ok(Dkim2Signer::from_key(load_dkim_key(dkim2_cfg)?)
-                    .domain(dkim2_cfg.domain.clone().unwrap_or_else(|| domain.clone()))
-                    .selector(dkim2_cfg.selector.clone()))
-            })
-            .transpose()?;
+        let dkim2_signer = Dkim2Signer::from_key(load_dkim_key(&cfg.dkim2)?)
+            .domain(cfg.dkim2.domain.clone().unwrap_or_else(|| domain.clone()))
+            .selector(cfg.dkim2.selector.clone());
 
         Ok(List {
             name: name.to_string(),
@@ -191,9 +183,10 @@ impl List {
         &self.sealer
     }
 
-    /// The DKIM2 signer, if `[dkim2]` is configured for this list.
-    pub fn dkim2_signer(&self) -> Option<&Dkim2Signer<Dkim2Done>> {
-        self.dkim2_signer.as_ref()
+    /// The list's DKIM2 signer. Whether it is actually used for a given delivery is decided
+    /// per-message — see [`crate::sign::should_sign_dkim2`].
+    pub fn dkim2_signer(&self) -> &Dkim2Signer<Dkim2Done> {
+        &self.dkim2_signer
     }
 
     /// The `List-Id` namespace used for this list.

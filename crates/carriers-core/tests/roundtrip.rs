@@ -136,38 +136,18 @@ fn authored_message(author_key_file: &std::path::Path) -> Vec<u8> {
     out
 }
 
+/// `[dkim2]` is required config (like `[dkim]`/`[arc]`), so callers that don't care about its
+/// specific key generate a throwaway one internally.
 fn build_list(
     dir: &std::path::Path,
     dkim_file: &std::path::Path,
     arc_file: &std::path::Path,
 ) -> List {
-    let toml = format!(
-        r#"
-posting_address = "dev@lists.example.org"
-display_name = "Dev List"
-unsubscribe_oneclick = "https://lists.example.org/u/dev"
-
-[dkim]
-selector = "dkimtest"
-key_file = "{dkim}"
-algorithm = "ed25519"
-domain = "lists.example.org"
-
-[arc]
-selector = "arctest"
-key_file = "{arc}"
-algorithm = "ed25519"
-domain = "lists.example.org"
-"#,
-        dkim = dkim_file.display(),
-        arc = arc_file.display(),
-    );
-    let path = dir.join("dev.toml");
-    std::fs::write(&path, toml).unwrap();
-    List::load("dev", &path).unwrap()
+    let (dkim2_file, _) = make_key(dir, "dkim2-throwaway.der");
+    build_list_with_dkim2(dir, dkim_file, arc_file, &dkim2_file)
 }
 
-/// Like [`build_list`], but with an additional `[dkim2]` key configured (DKIM2 is opt-in).
+/// Like [`build_list`], but the caller supplies (and so knows) the `[dkim2]` key file.
 fn build_list_with_dkim2(
     dir: &std::path::Path,
     dkim_file: &std::path::Path,
@@ -386,36 +366,32 @@ async fn dkim2_chain_link_is_valid_per_recipient_delivery() {
     );
 }
 
-#[tokio::test]
-async fn dkim2_for_delivery_is_a_noop_when_not_configured() {
-    let dir = tempfile::tempdir().unwrap();
-    let (dkim_file, _) = make_key(dir.path(), "dkim.der");
-    let (arc_file, _) = make_key(dir.path(), "arc.der");
-    let list = build_list(dir.path(), &dkim_file, &arc_file);
-    let augmented = augment(&list, FIXTURE).await;
+/// `should_sign_dkim2` (the pipeline's gate for whether to call `sign_dkim2_for_delivery` at all)
+/// only says yes once the inbound message already carried a DKIM2 signature of its own — the list
+/// always has a `[dkim2]` key configured (like `[dkim]`/`[arc]`), but never originates a chain.
+#[test]
+fn extending_the_chain_depends_on_the_inbound_messages_own_dkim2_signature() {
+    use carriers_core::sign::{AuthVerdict, should_sign_dkim2};
 
-    let out = sign::sign_dkim2_for_delivery(
-        &list,
-        FIXTURE,
-        &augmented,
-        "dev+bounce=bob=subscriber.example@lists.example.org",
-        "bob@subscriber.example",
-    )
-    .unwrap();
-    assert_eq!(
-        out, augmented,
-        "no [dkim2] key means no chain link is added"
-    );
-}
-
-#[tokio::test]
-async fn dkim2_is_unset_when_not_configured() {
-    let dir = tempfile::tempdir().unwrap();
-    let (dkim_file, _) = make_key(dir.path(), "dkim.der");
-    let (arc_file, _) = make_key(dir.path(), "arc.der");
-    let list = build_list(dir.path(), &dkim_file, &arc_file);
+    let verdict_without_dkim2 = AuthVerdict {
+        dmarc_pass: true,
+        dmarc_policy: "none",
+        dkim_result: "pass",
+        spf_result: "pass",
+        dkim1_result: "pass",
+        dkim2_result: "none",
+    };
     assert!(
-        list.dkim2_signer().is_none(),
-        "dkim2 must stay opt-in: no [dkim2] section means no signer"
+        !should_sign_dkim2(&verdict_without_dkim2, false),
+        "no DKIM2 signature on the inbound message means no chain to extend"
+    );
+
+    let verdict_with_dkim2 = AuthVerdict {
+        dkim2_result: "pass",
+        ..verdict_without_dkim2
+    };
+    assert!(
+        should_sign_dkim2(&verdict_with_dkim2, false),
+        "an inbound DKIM2 chain should be extended"
     );
 }

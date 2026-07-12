@@ -50,9 +50,12 @@ selector = "arc"
 key_file = "/etc/carriers/keys/dev/arc.der"
 algorithm = "ed25519"
 
-# Opt-in DKIM2 signing (draft-ietf-dkim-dkim2-spec — see "DKIM2 support" in the README). Adds a
-# per-recipient DKIM2 chain link alongside (not instead of) the [dkim]/[arc] above.
-# [dkim2]
-# selector = "dkim2"
-# key_file = "/etc/carriers/keys/dev/dkim2.der"
-# algorithm = "ed25519"
+# DKIM2 signing key (draft-ietf-dkim-dkim2-spec — see "DKIM2 support" in the README), configured
+# like [dkim]/[arc] above. It is not an on/off switch: the list always has this key available, but
+# only ever uses it to extend a DKIM2 chain the inbound message already carried, never to start
+# one of its own — most inbound mail today has no DKIM2 signature at all, so this key simply goes
+# unused for it.
+[dkim2]
+selector = "dkim2"
+key_file = "/etc/carriers/keys/dev/dkim2.der"
+algorithm = "ed25519"

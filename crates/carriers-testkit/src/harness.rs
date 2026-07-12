@@ -32,6 +32,7 @@ pub const LIST_DOMAIN: &str = "lists.example.org";
 pub const AUTHOR_FROM: &str = "alice@example.com";
 pub const AUTHOR_DOMAIN: &str = "example.com";
 pub const AUTHOR_SELECTOR: &str = "auth";
+pub const AUTHOR_DKIM2_SELECTOR: &str = "authdkim2";
 pub const SUBSCRIBER: &str = "bob@subscriber.example";
 
 /// A third-party domain publishing a strict, enforcing DMARC policy but authorizing no sender —
@@ -49,8 +50,6 @@ pub struct HarnessOpts {
     pub author_dmarc_policy: String,
     /// Whether the sink prints a live verdict line per delivered copy.
     pub print_verdicts: bool,
-    /// Configure a `[dkim2]` key for the list (opt-in — see `List::dkim2_signer`).
-    pub list_dkim2: bool,
 }
 
 impl Default for HarnessOpts {
@@ -58,7 +57,6 @@ impl Default for HarnessOpts {
         Self {
             author_dmarc_policy: "reject".to_string(),
             print_verdicts: false,
-            list_dkim2: false,
         }
     }
 }
@@ -72,6 +70,10 @@ pub struct Harness {
     pub dns: MockDns,
     pub sink: Sink,
     pub author: AuthorKey,
+    /// The author's DKIM2 key — unused unless a scenario explicitly signs with it
+    /// (`sender::sign_as_author_dkim2`), to simulate a message that already participates in a
+    /// DKIM2 chain before it ever reaches the list.
+    pub author_dkim2: AuthorKey,
     pub capture_dir: PathBuf,
 }
 
@@ -85,16 +87,17 @@ impl Harness {
         std::fs::create_dir_all(&keys_dir)?;
         std::fs::create_dir_all(&lists_dir)?;
 
-        // Generate the three keys and remember the DNS records they must be published under.
+        // Generate the keys and remember the DNS records they must be published under. Every
+        // list has a DKIM2 key configured, like DKIM/ARC — the author also gets one, so scenarios
+        // can simulate a message that already participates in a DKIM2 chain before it ever
+        // reaches the list (see `sender::sign_as_author_dkim2`).
         let (author_key, author_txt) = make_key(&keys_dir, "author.der")?;
+        let (author_dkim2_key, author_dkim2_txt) = make_key(&keys_dir, "author.dkim2.der")?;
         let (list_dkim, list_dkim_txt) = make_key(&keys_dir, "list.dkim.der")?;
         let (list_arc, list_arc_txt) = make_key(&keys_dir, "list.arc.der")?;
-        let list_dkim2 = opts
-            .list_dkim2
-            .then(|| make_key(&keys_dir, "list.dkim2.der"))
-            .transpose()?;
+        let (list_dkim2, list_dkim2_txt) = make_key(&keys_dir, "list.dkim2.der")?;
 
-        // Assemble the zone file: DKIM public keys, DMARC and SPF for both domains.
+        // Assemble the zone file: DKIM/DKIM2 public keys, DMARC and SPF for both domains.
         let mut zone = dns::base_zone();
         zone.push_str(&zone_records(
             &author_txt,
@@ -102,11 +105,10 @@ impl Harness {
             &list_arc_txt,
             &opts.author_dmarc_policy,
         ));
-        if let Some((_, dkim2_txt)) = &list_dkim2 {
-            zone.push_str(&format!(
-                "dkim2._domainkey.{LIST_DOMAIN}. IN TXT \"{dkim2_txt}\"\n"
-            ));
-        }
+        zone.push_str(&format!(
+            "{AUTHOR_DKIM2_SELECTOR}._domainkey.{AUTHOR_DOMAIN}. IN TXT \"{author_dkim2_txt}\"\n\
+             dkim2._domainkey.{LIST_DOMAIN}. IN TXT \"{list_dkim2_txt}\"\n"
+        ));
         let dns = dns::start(&zone).await.context("starting mock DNS")?;
 
         // The sink stands in for subscribers' servers; it scores against the mock DNS.
@@ -125,8 +127,7 @@ impl Harness {
         // Write the daemon config + list definition.
         let db_path = root.join("carriers.db");
         write_config(&root, ingress_port, sink.port(), &db_path, &lists_dir)?;
-        let dkim2_key_file = list_dkim2.as_ref().map(|(path, _)| path.as_path());
-        write_list(&lists_dir, &list_dkim, &list_arc, dkim2_key_file)?;
+        write_list(&lists_dir, &list_dkim, &list_arc, &list_dkim2)?;
 
         // Seed one subscriber so distribution actually produces a delivered copy.
         seed_subscriber(&db_path).await?;
@@ -157,6 +158,12 @@ impl Harness {
             author: AuthorKey {
                 key_file: author_key,
                 selector: AUTHOR_SELECTOR.to_string(),
+                domain: AUTHOR_DOMAIN.to_string(),
+                algorithm: Algorithm::Ed25519,
+            },
+            author_dkim2: AuthorKey {
+                key_file: author_dkim2_key,
+                selector: AUTHOR_DKIM2_SELECTOR.to_string(),
                 domain: AUTHOR_DOMAIN.to_string(),
                 algorithm: Algorithm::Ed25519,
             },
@@ -228,13 +235,8 @@ fn write_config(
     std::fs::write(root.join("carriers.toml"), toml).context("writing carriers.toml")
 }
 
-fn write_list(
-    lists_dir: &Path,
-    dkim_key: &Path,
-    arc_key: &Path,
-    dkim2_key: Option<&Path>,
-) -> Result<()> {
-    let mut toml = format!(
+fn write_list(lists_dir: &Path, dkim_key: &Path, arc_key: &Path, dkim2_key: &Path) -> Result<()> {
+    let toml = format!(
         "posting_address = \"{POSTING_ADDRESS}\"\n\
          display_name = \"Dev List\"\n\
          policy = \"open\"\n\
@@ -249,20 +251,17 @@ fn write_list(
          selector = \"arc\"\n\
          key_file = \"{arc}\"\n\
          algorithm = \"ed25519\"\n\
+         domain = \"{LIST_DOMAIN}\"\n\
+         \n\
+         [dkim2]\n\
+         selector = \"dkim2\"\n\
+         key_file = \"{dkim2}\"\n\
+         algorithm = \"ed25519\"\n\
          domain = \"{LIST_DOMAIN}\"\n",
         dkim = dkim_key.display(),
         arc = arc_key.display(),
+        dkim2 = dkim2_key.display(),
     );
-    if let Some(dkim2_key) = dkim2_key {
-        toml.push_str(&format!(
-            "\n[dkim2]\n\
-             selector = \"dkim2\"\n\
-             key_file = \"{dkim2}\"\n\
-             algorithm = \"ed25519\"\n\
-             domain = \"{LIST_DOMAIN}\"\n",
-            dkim2 = dkim2_key.display(),
-        ));
-    }
     std::fs::write(lists_dir.join(format!("{LIST_NAME}.toml")), toml).context("writing list toml")
 }
 

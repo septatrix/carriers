@@ -261,6 +261,17 @@ pub async fn sign_and_seal(
     Ok(out)
 }
 
+/// Whether the list should extend the message's DKIM2 chain at delivery. carriers never
+/// originates a DKIM2 chain of its own — that only makes sense once the inbound message already
+/// participates in one, i.e. `verdict.dkim2_result` is anything other than `"none"` (whether that
+/// existing chain itself passed, failed, or errored is irrelevant here: extending it is still
+/// meaningful, and `sign_dkim2_for_delivery` re-derives the next `i=` from what's actually there).
+/// Also withheld whenever `no_own_dkim` is set, for the same reason the list's classic
+/// `DKIM-Signature` is withheld — see [`AuthVerdict`].
+pub fn should_sign_dkim2(verdict: &AuthVerdict, no_own_dkim: bool) -> bool {
+    !no_own_dkim && verdict.dkim2_result != "none"
+}
+
 /// Add the list's own DKIM2 chain link for one specific outbound delivery, bound to the exact
 /// SMTP envelope (`mail_from`/`rcpt_to`) that delivery will use. Unlike ARC/classic DKIM, DKIM2
 /// verification requires an *exact* match against the real envelope — see [`sign_and_seal`]'s
@@ -269,12 +280,9 @@ pub async fn sign_and_seal(
 /// `original` is the pristine inbound message, before any of carriers' own transforms (List
 /// headers, munge-from) — the diff baseline for the chain link's recipe, so it records exactly
 /// what carriers changed. `message` is the fully ARC-sealed/DKIM-signed message produced by
-/// [`sign_and_seal`] (identical for every recipient — only the envelope differs here). Returns
-/// `message` unchanged if the list has no `[dkim2]` key configured.
-///
-/// No prior verification of the message's existing DKIM2 chain is needed — the next `i=` is
-/// derived from whatever chain `message` already carries (0, in carriers' case, since it never
-/// arrives with one).
+/// [`sign_and_seal`] (identical for every recipient — only the envelope differs here). Call this
+/// only when [`should_sign_dkim2`] says so; there is no such thing as "no DKIM2 key configured"
+/// to fall back on.
 pub fn sign_dkim2_for_delivery(
     list: &List,
     original: &[u8],
@@ -282,10 +290,8 @@ pub fn sign_dkim2_for_delivery(
     mail_from: &str,
     rcpt_to: &str,
 ) -> Result<Vec<u8>> {
-    let Some(dkim2_signer) = list.dkim2_signer() else {
-        return Ok(message.to_vec());
-    };
-    let signed = dkim2_signer
+    let signed = list
+        .dkim2_signer()
         .sign_revised(original, message, Hop::real(mail_from, [rcpt_to]))
         .map_err(|e| Error::Auth(format!("DKIM2 signing failed: {e}")))?;
 
@@ -299,7 +305,33 @@ pub fn sign_dkim2_for_delivery(
 mod tests {
     use mail_auth::{DkimOutput, Error as MailAuthError};
 
-    use super::dkim1_result_str;
+    use super::{AuthVerdict, dkim1_result_str, should_sign_dkim2};
+
+    fn verdict_with_dkim2_result(dkim2_result: &'static str) -> AuthVerdict {
+        AuthVerdict {
+            dmarc_pass: true,
+            dmarc_policy: "none",
+            dkim_result: "pass",
+            spf_result: "pass",
+            dkim1_result: "pass",
+            dkim2_result,
+        }
+    }
+
+    #[test]
+    fn extends_the_chain_only_when_the_inbound_message_already_had_one() {
+        assert!(should_sign_dkim2(&verdict_with_dkim2_result("pass"), false));
+        assert!(should_sign_dkim2(&verdict_with_dkim2_result("fail"), false));
+        assert!(!should_sign_dkim2(
+            &verdict_with_dkim2_result("none"),
+            false
+        ));
+    }
+
+    #[test]
+    fn never_signs_when_the_list_own_dkim_is_withheld() {
+        assert!(!should_sign_dkim2(&verdict_with_dkim2_result("pass"), true));
+    }
 
     #[test]
     fn pass_wins_even_alongside_a_failing_signature() {
