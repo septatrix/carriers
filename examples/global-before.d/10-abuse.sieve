@@ -1,4 +1,5 @@
-# Example global "before" Sieve policy — see the README's "Global policy" section and
+# Example global "before" Sieve drop-in — one file in the `global-before.d` directory (all its
+# `*.sieve` files run in filename order). See the README's "Global policy" section and
 # `examples/carriers.toml`'s `[global_policy]` table.
 #
 # This runs for every list, ahead of that list's own `policy`, so it can enforce rules that

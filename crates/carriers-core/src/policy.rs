@@ -62,12 +62,16 @@
 //! ## Global policy
 //!
 //! Further, optional scripts may run for *every* list, wrapped around that list's own `policy`:
-//! a global one, plus an additional one per list domain. All of these run after the
-//! loop/duplicate checks, once the current list is already known, so they still see that list's
-//! membership sets — unlike the list-independent tier sketched in the README's roadmap, which
-//! would run before a list is even resolved.
+//! a global set, plus an additional set per list domain. Each set is a `.d` drop-in directory —
+//! every `*.sieve` file in it runs, in filename order (like a systemd drop-in directory), so
+//! rules can be layered by dropping in numbered files (`10-abuse.sieve`, `20-archive.sieve`, …).
+//! All of these run after the loop/duplicate checks, once the current list is already known, so
+//! they still see that list's membership sets — unlike the list-independent tier sketched in the
+//! README's roadmap, which would run before a list is even resolved.
 //!
-//! The full chain, outside-in for the "before" scripts and inside-out for "after":
+//! The full chain, outside-in for the "before" scripts and inside-out for "after" (each of
+//! `global before` / `domain before` / `domain after` / `global after` being a whole directory
+//! of drop-ins run in order):
 //!
 //! ```text
 //! global before -> domain before -> the list's own policy -> domain after -> global after
@@ -191,26 +195,28 @@ impl ExternalLists for MembershipSets {
     }
 }
 
-/// Before/after Sieve scripts scoped to one list domain — see
-/// [`PolicyEngine::with_domain_before`]/[`PolicyEngine::with_domain_after`].
+/// Before/after Sieve drop-in scripts scoped to one list domain — see
+/// [`PolicyEngine::with_domain_before`]/[`PolicyEngine::with_domain_after`]. Each is the
+/// compiled contents of a `.d` directory, in filename order.
 #[derive(Default)]
 struct DomainScripts {
-    before: Option<Arc<Sieve>>,
-    after: Option<Arc<Sieve>>,
+    before: Vec<Arc<Sieve>>,
+    after: Vec<Arc<Sieve>>,
 }
 
 /// A registry of compiled Sieve policies: the built-in loop/dedup checks and posting policies,
 /// plus any custom scripts loaded from a directory of `*.sieve` files, plus the optional
-/// global/domain scripts run around them (see [`PolicyEngine::evaluate_before`] and
-/// [`PolicyEngine::evaluate_after`]).
+/// global/domain drop-in scripts run around them (see [`PolicyEngine::evaluate_before`] and
+/// [`PolicyEngine::evaluate_after`]). The global/domain scripts are each a `.d` directory's
+/// worth of `.sieve` files, run in filename order.
 pub struct PolicyEngine {
     engine: SieveEngine,
     loop_check: Arc<Sieve>,
     duplicate_check: Arc<Sieve>,
     list_headers: Arc<Sieve>,
     policies: HashMap<String, Arc<Sieve>>,
-    global_before: Option<Arc<Sieve>>,
-    global_after: Option<Arc<Sieve>>,
+    global_before: Vec<Arc<Sieve>>,
+    global_after: Vec<Arc<Sieve>>,
     domains: HashMap<String, DomainScripts>,
 }
 
@@ -244,40 +250,66 @@ impl PolicyEngine {
             duplicate_check,
             list_headers,
             policies,
-            global_before: None,
-            global_after: None,
+            global_before: Vec::new(),
+            global_after: Vec::new(),
             domains: HashMap::new(),
         })
     }
 
-    /// Compile and attach the global "before" script, run ahead of every list's own policy,
-    /// regardless of domain — see [`PolicyEngine::evaluate_before`].
-    pub fn with_global_before(mut self, path: &Path) -> Result<Self> {
-        self.global_before = Some(self.compile_file(path, "global before")?);
+    /// Compile and attach the global "before" drop-in directory: every `*.sieve` file in `dir`,
+    /// run in filename order ahead of every list's own policy, regardless of domain — see
+    /// [`PolicyEngine::evaluate_before`].
+    pub fn with_global_before(mut self, dir: &Path) -> Result<Self> {
+        self.global_before = self.compile_dir(dir, "global before")?;
         Ok(self)
     }
 
-    /// Compile and attach the global "after" script, run after every list's own policy,
-    /// regardless of domain — see [`PolicyEngine::evaluate_after`].
-    pub fn with_global_after(mut self, path: &Path) -> Result<Self> {
-        self.global_after = Some(self.compile_file(path, "global after")?);
+    /// Compile and attach the global "after" drop-in directory: every `*.sieve` file in `dir`,
+    /// run in filename order after every list's own policy, regardless of domain — see
+    /// [`PolicyEngine::evaluate_after`].
+    pub fn with_global_after(mut self, dir: &Path) -> Result<Self> {
+        self.global_after = self.compile_dir(dir, "global after")?;
         Ok(self)
     }
 
-    /// Compile and attach a "before" script scoped to `domain`, run between the global "before"
-    /// script and the list's own policy, for lists in that domain only.
-    pub fn with_domain_before(mut self, domain: &str, path: &Path) -> Result<Self> {
-        let compiled = self.compile_file(path, &format!("domain `{domain}` before"))?;
-        self.domains.entry(domain.to_string()).or_default().before = Some(compiled);
+    /// Compile and attach a "before" drop-in directory scoped to `domain`, run (in filename
+    /// order) between the global "before" scripts and the list's own policy, for lists in that
+    /// domain only.
+    pub fn with_domain_before(mut self, domain: &str, dir: &Path) -> Result<Self> {
+        let scripts = self.compile_dir(dir, &format!("domain `{domain}` before"))?;
+        self.domains.entry(domain.to_string()).or_default().before = scripts;
         Ok(self)
     }
 
-    /// Compile and attach an "after" script scoped to `domain`, run between the list's own
-    /// policy and the global "after" script, for lists in that domain only.
-    pub fn with_domain_after(mut self, domain: &str, path: &Path) -> Result<Self> {
-        let compiled = self.compile_file(path, &format!("domain `{domain}` after"))?;
-        self.domains.entry(domain.to_string()).or_default().after = Some(compiled);
+    /// Compile and attach an "after" drop-in directory scoped to `domain`, run (in filename
+    /// order) between the list's own policy and the global "after" scripts, for lists in that
+    /// domain only.
+    pub fn with_domain_after(mut self, domain: &str, dir: &Path) -> Result<Self> {
+        let scripts = self.compile_dir(dir, &format!("domain `{domain}` after"))?;
+        self.domains.entry(domain.to_string()).or_default().after = scripts;
         Ok(self)
+    }
+
+    /// Compile every `*.sieve` file directly in `dir`, returned in filename order (like a
+    /// systemd `.d` drop-in directory). Nested directories are ignored.
+    fn compile_dir(&self, dir: &Path, what: &str) -> Result<Vec<Arc<Sieve>>> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| {
+                Error::Config(format!(
+                    "reading {what} drop-in directory {}: {e}",
+                    dir.display()
+                ))
+            })?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("sieve"))
+            .collect();
+        // Filenames share the parent, so sorting the full paths orders them by name.
+        paths.sort();
+
+        paths
+            .iter()
+            .map(|path| self.compile_file(path, what))
+            .collect()
     }
 
     fn compile_file(&self, path: &Path, what: &str) -> Result<Arc<Sieve>> {
@@ -432,13 +464,13 @@ impl PolicyEngine {
             .await
     }
 
-    /// The "before" half of the policy chain, decided at intake: the global "before" script,
-    /// this domain's "before" script, then the named list policy. See the module docs for how
-    /// these compose. Any tier that was never configured (via
-    /// [`PolicyEngine::with_global_before`] and friends, or because `domain` has no entry) is
-    /// simply skipped. The "after" half runs later, in [`PolicyEngine::evaluate_after`].
+    /// The "before" half of the policy chain, decided at intake: the global "before" drop-ins,
+    /// this domain's "before" drop-ins, then the named list policy — each group of drop-ins run
+    /// in filename order. See the module docs for how these compose. Any group that is empty
+    /// (unconfigured, or the domain has no entry) is simply skipped. The "after" half runs later,
+    /// in [`PolicyEngine::evaluate_after`].
     ///
-    /// The returned `archive` flag is the union across every tier that ran, so a message is
+    /// The returned `archive` flag is the union across every script that ran, so a message is
     /// archived if any of them filed it into the `archive` pseudo-mailbox.
     #[allow(clippy::too_many_arguments)]
     pub async fn evaluate_before(
@@ -452,64 +484,49 @@ impl PolicyEngine {
         sets: &MembershipSets,
     ) -> Result<PolicyOutcome> {
         let domain_scripts = self.domains.get(domain);
-        let mut decision = PolicyDecision::Approve;
-        let mut archive = false;
+        let mut acc = Accumulator::default();
 
-        if let Some(script) = &self.global_before {
-            let out = self
-                .run_tier(
-                    script,
-                    "global-before",
-                    list_name,
-                    list_id,
-                    mail_from,
-                    raw,
-                    sets,
-                )
-                .await?;
-            archive |= out.archive;
-            decision = merge(decision, out.decision);
-        }
-        if is_terminal(&decision) {
-            return Ok(PolicyOutcome { decision, archive });
-        }
-
-        if let Some(script) = domain_scripts.and_then(|d| d.before.as_ref()) {
-            let out = self
-                .run_tier(
-                    script,
-                    "domain-before",
-                    list_name,
-                    list_id,
-                    mail_from,
-                    raw,
-                    sets,
-                )
-                .await?;
-            archive |= out.archive;
-            decision = merge(decision, out.decision);
-        }
-        if is_terminal(&decision) {
-            return Ok(PolicyOutcome { decision, archive });
+        self.run_scripts(
+            &self.global_before,
+            "global-before",
+            list_name,
+            list_id,
+            mail_from,
+            raw,
+            sets,
+            &mut acc,
+        )
+        .await?;
+        if let Some(d) = domain_scripts {
+            self.run_scripts(
+                &d.before,
+                "domain-before",
+                list_name,
+                list_id,
+                mail_from,
+                raw,
+                sets,
+                &mut acc,
+            )
+            .await?;
         }
 
-        // An earlier `Moderate` already means the message will be held; the list's own policy
-        // has nothing to add, so it only runs while the decision so far is still `Approve`.
-        if matches!(decision, PolicyDecision::Approve) {
+        // An earlier `Moderate`/terminal already decided the message's fate; the list's own
+        // policy only runs while the decision so far is still `Approve`.
+        if matches!(acc.decision, PolicyDecision::Approve) {
             let out = self
                 .evaluate(policy_name, list_name, list_id, mail_from, raw, sets)
                 .await?;
-            archive |= out.archive;
-            decision = merge(decision, out.decision);
+            acc.merge(out);
         }
-        Ok(PolicyOutcome { decision, archive })
+        Ok(acc.into_outcome())
     }
 
     /// The "after" half of the policy chain, decided at distribution time — after moderation —
     /// so it has the final word on a message about to go out (see
-    /// [`crate::pipeline::finalize`]): this domain's "after" script, then the global "after"
-    /// script. It starts from `Approve` (only about-to-distribute messages reach it) and may
-    /// tighten that to a hold, discard, or reject — or archive it.
+    /// [`crate::pipeline::finalize`]): this domain's "after" drop-ins, then the global "after"
+    /// drop-ins, each run in filename order. It starts from `Approve` (only about-to-distribute
+    /// messages reach it) and may tighten that to a hold, discard, or reject — or archive it.
     pub async fn evaluate_after(
         &self,
         list_name: &str,
@@ -520,44 +537,60 @@ impl PolicyEngine {
         sets: &MembershipSets,
     ) -> Result<PolicyOutcome> {
         let domain_scripts = self.domains.get(domain);
-        let mut decision = PolicyDecision::Approve;
-        let mut archive = false;
+        let mut acc = Accumulator::default();
 
-        if let Some(script) = domain_scripts.and_then(|d| d.after.as_ref()) {
-            let out = self
-                .run_tier(
-                    script,
-                    "domain-after",
-                    list_name,
-                    list_id,
-                    mail_from,
-                    raw,
-                    sets,
-                )
-                .await?;
-            archive |= out.archive;
-            decision = merge(decision, out.decision);
+        if let Some(d) = domain_scripts {
+            self.run_scripts(
+                &d.after,
+                "domain-after",
+                list_name,
+                list_id,
+                mail_from,
+                raw,
+                sets,
+                &mut acc,
+            )
+            .await?;
         }
-        if is_terminal(&decision) {
-            return Ok(PolicyOutcome { decision, archive });
-        }
+        self.run_scripts(
+            &self.global_after,
+            "global-after",
+            list_name,
+            list_id,
+            mail_from,
+            raw,
+            sets,
+            &mut acc,
+        )
+        .await?;
+        Ok(acc.into_outcome())
+    }
 
-        if let Some(script) = &self.global_after {
+    /// Run each script in `scripts` in order, folding its outcome into `acc`, until one reaches a
+    /// terminal (`Discard`/`Reject`) decision — after which the remaining scripts are skipped, as
+    /// there is nothing left for them to decide.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_scripts(
+        &self,
+        scripts: &[Arc<Sieve>],
+        tier_name: &str,
+        list_name: &str,
+        list_id: &str,
+        mail_from: &str,
+        raw: &[u8],
+        sets: &MembershipSets,
+        acc: &mut Accumulator,
+    ) -> Result<()> {
+        for script in scripts {
+            if is_terminal(&acc.decision) {
+                break;
+            }
             let out = self
-                .run_tier(
-                    script,
-                    "global-after",
-                    list_name,
-                    list_id,
-                    mail_from,
-                    raw,
-                    sets,
-                )
+                .run_tier(script, tier_name, list_name, list_id, mail_from, raw, sets)
                 .await?;
-            archive |= out.archive;
-            decision = merge(decision, out.decision);
+            acc.merge(out);
         }
-        Ok(PolicyOutcome { decision, archive })
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -623,6 +656,39 @@ struct NoLists;
 impl ExternalLists for NoLists {
     fn contains(&self, _list: &str, _value: &str) -> bool {
         false
+    }
+}
+
+/// Running state while folding a sequence of policy tiers/drop-in scripts together: the decision
+/// reached so far and whether any of them requested an archive copy.
+struct Accumulator {
+    decision: PolicyDecision,
+    archive: bool,
+}
+
+impl Default for Accumulator {
+    fn default() -> Self {
+        Accumulator {
+            decision: PolicyDecision::Approve,
+            archive: false,
+        }
+    }
+}
+
+impl Accumulator {
+    fn merge(&mut self, out: PolicyOutcome) {
+        self.archive |= out.archive;
+        self.decision = merge(
+            std::mem::replace(&mut self.decision, PolicyDecision::Approve),
+            out.decision,
+        );
+    }
+
+    fn into_outcome(self) -> PolicyOutcome {
+        PolicyOutcome {
+            decision: self.decision,
+            archive: self.archive,
+        }
     }
 }
 

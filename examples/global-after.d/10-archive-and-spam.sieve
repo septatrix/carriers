@@ -1,4 +1,5 @@
-# Example global "after" Sieve policy — see the README's "Global policy" section and
+# Example global "after" Sieve drop-in — one file in the `global-after.d` directory (all its
+# `*.sieve` files run in filename order). See the README's "Global policy" section and
 # `examples/carriers.toml`'s `[global_policy]` table.
 #
 # This runs for every list, after that list's own `policy` has already decided. It's the

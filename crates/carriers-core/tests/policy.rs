@@ -169,9 +169,12 @@ fn custom_policy_may_not_reuse_a_builtin_name() {
     assert!(PolicyEngine::load(dir.path()).is_err());
 }
 
-fn write_sieve(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+/// Create a `.d` drop-in directory named `name` under `dir`, holding a single script `body`,
+/// and return its path (for the `with_global_before`/… builders, which take a directory).
+fn dropin(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("10-x.sieve"), body).unwrap();
     path
 }
 
@@ -307,9 +310,9 @@ async fn evaluate_before_without_any_global_scripts_just_runs_the_named_policy()
 async fn global_before_short_circuits_ahead_of_the_list_policy() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
-    let before = write_sieve(
+    let before = dropin(
         dir.path(),
-        "before.sieve",
+        "before.d",
         r#"require "envelope"; if address :is "from" "spammer@evil.example" { discard; }"#,
     );
     let engine = PolicyEngine::load(dir.path())
@@ -329,9 +332,9 @@ async fn global_before_short_circuits_ahead_of_the_list_policy() {
 async fn global_before_no_opinion_falls_through_to_the_list_policy() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
-    let before = write_sieve(
+    let before = dropin(
         dir.path(),
-        "before.sieve",
+        "before.d",
         r#"require "envelope"; if address :is "from" "nobody@evil.example" { discard; }"#,
     );
     let engine = PolicyEngine::load(dir.path())
@@ -351,7 +354,7 @@ async fn global_before_no_opinion_falls_through_to_the_list_policy() {
 async fn domain_before_only_applies_to_its_own_domain() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
-    let before = write_sieve(dir.path(), "before.sieve", "discard;\n");
+    let before = dropin(dir.path(), "before.d", "discard;\n");
     let engine = PolicyEngine::load(dir.path())
         .unwrap()
         .with_domain_before("lists.example.com", &before)
@@ -373,9 +376,9 @@ async fn domain_before_only_applies_to_its_own_domain() {
 async fn global_after_can_escalate_an_approval() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
-    let after = write_sieve(
+    let after = dropin(
         dir.path(),
-        "after.sieve",
+        "after.d",
         r#"require ["envelope", "reject"]; if address :is "from" "alice@example.com" { reject "blocked instance-wide"; }"#,
     );
     let engine = PolicyEngine::load(dir.path())
@@ -401,14 +404,14 @@ async fn global_after_can_escalate_an_approval() {
 async fn a_before_hold_then_a_later_after_reject() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
-    let before = write_sieve(
+    let before = dropin(
         dir.path(),
-        "before.sieve",
+        "before.d",
         "require \"fileinto\"; fileinto \"moderate\";\n",
     );
-    let after = write_sieve(
+    let after = dropin(
         dir.path(),
-        "after.sieve",
+        "after.d",
         r#"require ["envelope", "reject"]; reject "blocked instance-wide";"#,
     );
     let engine = PolicyEngine::load(dir.path())
@@ -438,16 +441,16 @@ async fn a_before_hold_then_a_later_after_reject() {
 async fn full_chain_runs_in_order_before_at_intake_after_at_finalize() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", "keep;\n"); // always approves on its own
-    let global_before = write_sieve(dir.path(), "gb.sieve", "# no opinion\n");
-    let domain_before = write_sieve(dir.path(), "db.sieve", "# no opinion\n");
-    let domain_after = write_sieve(
+    let global_before = dropin(dir.path(), "gb.d", "# no opinion\n");
+    let domain_before = dropin(dir.path(), "db.d", "# no opinion\n");
+    let domain_after = dropin(
         dir.path(),
-        "da.sieve",
+        "da.d",
         "require \"fileinto\"; fileinto \"moderate\";\n",
     );
-    let global_after = write_sieve(
+    let global_after = dropin(
         dir.path(),
-        "ga.sieve",
+        "ga.d",
         r#"require ["envelope", "reject"]; reject "final word";"#,
     );
     let engine = PolicyEngine::load(dir.path())
@@ -480,9 +483,9 @@ async fn fileinto_copy_archive_requests_an_archive_but_keeps_the_decision() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
     // A before-script archives every message but takes no decision of its own.
-    let before = write_sieve(
+    let before = dropin(
         dir.path(),
-        "before.sieve",
+        "before.d",
         "require [\"fileinto\", \"copy\"]; fileinto :copy \"archive\";\n",
     );
     let engine = PolicyEngine::load(dir.path())
@@ -559,9 +562,9 @@ async fn no_archive_when_no_tier_files_into_archive() {
 async fn archive_can_be_requested_by_the_after_tier() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "corporate", POLICY);
-    let after = write_sieve(
+    let after = dropin(
         dir.path(),
-        "after.sieve",
+        "after.d",
         "require [\"fileinto\", \"copy\"]; fileinto :copy \"archive\";\n",
     );
     let engine = PolicyEngine::load(dir.path())
@@ -585,6 +588,88 @@ async fn archive_can_be_requested_by_the_after_tier() {
         PolicyOutcome {
             decision: PolicyDecision::Approve,
             archive: true,
+        }
+    );
+}
+
+#[tokio::test]
+async fn before_dropins_run_in_filename_order_and_compose() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", "keep;\n"); // the list policy approves on its own
+    // Two drop-ins in one directory: 10- archives, 20- holds. Both effects must apply.
+    let before = dir.path().join("before.d");
+    std::fs::create_dir_all(&before).unwrap();
+    std::fs::write(
+        before.join("10-archive.sieve"),
+        "require [\"fileinto\", \"copy\"]; fileinto :copy \"archive\";\n",
+    )
+    .unwrap();
+    std::fs::write(
+        before.join("20-hold.sieve"),
+        "require \"fileinto\"; fileinto \"moderate\";\n",
+    )
+    .unwrap();
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_before(&before)
+        .unwrap();
+
+    let out = engine
+        .evaluate_before(
+            "corporate",
+            "dev",
+            LIST_ID,
+            "lists.example.org",
+            "x@example.com",
+            &message("x@example.com"),
+            &sets(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        PolicyOutcome {
+            decision: PolicyDecision::Moderate,
+            archive: true,
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_earlier_dropin_reject_short_circuits_later_dropins() {
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(dir.path(), "corporate", "keep;\n");
+    let before = dir.path().join("before.d");
+    std::fs::create_dir_all(&before).unwrap();
+    // `10-` rejects; `20-` would discard, but must never run, since reject is terminal. The
+    // result being a reject (not a discard) also proves `10-` ran before `20-`.
+    std::fs::write(
+        before.join("10-reject.sieve"),
+        "require \"reject\"; reject \"first\";\n",
+    )
+    .unwrap();
+    std::fs::write(before.join("20-discard.sieve"), "discard;\n").unwrap();
+    let engine = PolicyEngine::load(dir.path())
+        .unwrap()
+        .with_global_before(&before)
+        .unwrap();
+
+    let out = engine
+        .evaluate_before(
+            "corporate",
+            "dev",
+            LIST_ID,
+            "lists.example.org",
+            "x@example.com",
+            &message("x@example.com"),
+            &sets(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.decision,
+        PolicyDecision::Reject {
+            reason: "first".to_string()
         }
     );
 }

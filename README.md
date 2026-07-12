@@ -235,16 +235,19 @@ runs at the very end, just before signing, on a message that is going out.
 Alongside each list's own `policy`, further optional Sieve scripts can run wrapped around it,
 configured under `[global_policy]` in `carriers.toml` — right after loop and duplicate
 detection, so they still have access to the current list's membership sets, same as a per-list
-script. There are two axes:
+script. Each setting is a **`.d` drop-in directory**: every `*.sieve` file directly inside it is
+run, in filename order (like a systemd drop-in directory), so you can layer rules by dropping in
+numbered files (`10-abuse.sieve`, `20-archive.sieve`, …). There are two axes:
 
-- **before / after**: a `before` script runs at intake, ahead of the list's own policy, and helps
-  decide moderation. An `after` script runs later — at distribution time, *after* any moderation —
+- **before / after**: `before` scripts run at intake, ahead of the list's own policy, and help
+  decide moderation. `after` scripts run later — at distribution time, *after* any moderation —
   as a final gate on a message that is actually about to go out.
 - **instance-wide / per-domain**: `[global_policy]`'s own `before`/`after` apply to *every* list
   regardless of domain; `[global_policy.domains."some.domain"]` adds another before/after pair
   that only applies to lists whose posting address is under that one domain.
 
-The full chain, for a list under a domain that has its own entry:
+The full chain, for a list under a domain that has its own entry (each stage below being a whole
+drop-in directory, its scripts run in order):
 
 ```text
 # at intake:                                    # at distribution (after moderation):
@@ -257,15 +260,15 @@ now, hold it for moderation, discard it, or reject it. The **after** half (domai
 after) runs from `finalize` — for a message approved outright *or* one a moderator later
 approves — so it always gets the last word on what actually leaves the server.
 
-Any step that isn't configured is skipped. Set paths explicitly, or for the two instance-wide
-scripts, drop a `global-before.sieve` / `global-after.sieve` file next to `carriers.toml` and
-it's picked up automatically — domain-scoped scripts have no such auto-discovery and must be
-listed explicitly. See [`examples/carriers.toml`](examples/carriers.toml)'s `[global_policy]`
-table, and the example scripts
-[`examples/global-before.sieve`](examples/global-before.sieve) (instance-wide before),
-[`examples/global-after.sieve`](examples/global-after.sieve) (instance-wide after), and
-[`examples/lists.example.com-after.sieve`](examples/lists.example.com-after.sieve) (a
-domain-scoped after script, for `lists.example.com`).
+Any directory that isn't configured (or is empty) is skipped. Set paths explicitly, or for the
+two instance-wide directories, create a `global-before.d` / `global-after.d` directory next to
+`carriers.toml` and it's picked up automatically — domain-scoped directories have no such
+auto-discovery and must be listed explicitly. See
+[`examples/carriers.toml`](examples/carriers.toml)'s `[global_policy]` table, and the example
+drop-ins [`examples/global-before.d/`](examples/global-before.d) (instance-wide before),
+[`examples/global-after.d/`](examples/global-after.d) (instance-wide after), and
+[`examples/lists.example.com-after.d/`](examples/lists.example.com-after.d) (a domain-scoped
+after directory, for `lists.example.com`).
 
 At every step, an implicit keep (nothing in the script matched) is *not* authoritative — it just
 means that script found no reason to act, so whatever was decided so far (`Approve`, unless an
@@ -313,11 +316,11 @@ address is disabled — it is skipped as a recipient — until an operator runs
 
 Implemented: LMTP/SMTP ingress, per-list posting policies with message moderation (built-in
 open / subscribers / posters / moderated modes, or a Sieve script), optional instance-wide and
-per-domain Sieve scripts wrapped before/after every list's own policy, on-disk `.eml` archiving
-(`fileinto :copy "archive"`), VERP bounce processing with automatic delivery disabling, loop and
-duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, smarthost delivery,
-flat-file lists + SQLite membership (independent subscriber, poster and moderator roles), key
-generation.
+per-domain Sieve `.d` drop-in directories wrapped before/after every list's own policy, on-disk
+`.eml` archiving (`fileinto :copy "archive"`), VERP bounce processing with automatic delivery
+disabling, loop and duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing,
+smarthost delivery, flat-file lists + SQLite membership (independent subscriber, poster and
+moderator roles), key generation.
 
 Deferred / ideas:
 
