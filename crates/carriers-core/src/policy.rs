@@ -401,6 +401,72 @@ impl PolicyEngine {
         Ok(this)
     }
 
+    /// Load an entire Sieve-scripts root directory with a fixed, conventional layout — the single
+    /// knob a deployment configures (`sieve_scripts` in `carriers.toml`):
+    ///
+    /// ```text
+    /// <root>/
+    ///   moderation_policies/<name>.sieve    # per-list moderation policies, by file stem
+    ///   before.d/*.sieve                    # global "before" drop-ins
+    ///   after.d/*.sieve                     # global "after" drop-ins
+    ///   domains/<domain>/before.d/*.sieve   # per-domain before
+    ///   domains/<domain>/after.d/*.sieve    # per-domain after
+    /// ```
+    ///
+    /// Every part is optional: a missing subdirectory is simply skipped. This just discovers the
+    /// conventional paths and feeds them to [`load`](Self::load) / the `with_global_*` /
+    /// `with_domain_*` builders — the evaluation model is unchanged.
+    pub fn load_root(root: &Path) -> Result<Self> {
+        let moderation = root.join("moderation_policies");
+        let mut this = if moderation.is_dir() {
+            Self::load(&moderation)?
+        } else {
+            Self::new()?
+        };
+
+        let before = root.join("before.d");
+        if before.is_dir() {
+            this = this.with_global_before(&before)?;
+        }
+        let after = root.join("after.d");
+        if after.is_dir() {
+            this = this.with_global_after(&after)?;
+        }
+
+        let domains = root.join("domains");
+        if domains.is_dir() {
+            // Sort so domains attach (and any diagnostics report) in a stable order.
+            let mut domain_dirs: Vec<_> = std::fs::read_dir(&domains)
+                .map_err(|e| {
+                    Error::Config(format!(
+                        "reading domains directory {}: {e}",
+                        domains.display()
+                    ))
+                })?
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect();
+            domain_dirs.sort();
+
+            for domain_dir in domain_dirs {
+                let Some(domain) = domain_dir.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let domain = domain.to_string();
+                let before = domain_dir.join("before.d");
+                if before.is_dir() {
+                    this = this.with_domain_before(&domain, &before)?;
+                }
+                let after = domain_dir.join("after.d");
+                if after.is_dir() {
+                    this = this.with_domain_after(&domain, &after)?;
+                }
+            }
+        }
+
+        Ok(this)
+    }
+
     /// Whether a policy with this name exists (built-in or custom).
     pub fn contains(&self, name: &str) -> bool {
         self.policies.contains_key(name)
@@ -412,6 +478,21 @@ impl PolicyEngine {
             .keys()
             .map(String::as_str)
             .filter(|name| !is_builtin(name))
+    }
+
+    /// Number of compiled global "before" drop-in scripts.
+    pub fn global_before_count(&self) -> usize {
+        self.global_before.len()
+    }
+
+    /// Number of compiled global "after" drop-in scripts.
+    pub fn global_after_count(&self) -> usize {
+        self.global_after.len()
+    }
+
+    /// Domains that have their own before/after drop-in scripts.
+    pub fn domains(&self) -> impl Iterator<Item = &str> {
+        self.domains.keys().map(String::as_str)
     }
 
     /// Run the built-in loop check (`loop.sieve`): a header check against this list's own

@@ -18,39 +18,29 @@ db_path = "/var/lib/carriers/carriers.db"
 # Directory of per-list `<name>.toml` files.
 lists_dir = "/etc/carriers/lists"
 
-# Directory of custom Sieve moderation policies (`<name>.sieve`). Only needed if a list's
-# `policy` names a custom script rather than a built-in policy. Each file's name (without
-# extension) is the policy name.
-policies_dir = "/etc/carriers/policies"
+# Root directory holding all of this deployment's Sieve scripts, in a fixed layout (see the
+# README's "Global policy" section). If left unset, a `sieve_scripts` directory next to this
+# config file is used automatically if one exists. All of it is optional.
+#
+#   sieve_scripts/
+#     moderation_policies/<name>.sieve    # per-list moderation policies, named by file stem;
+#                                         # referenced by a list's `policy = "<name>"`
+#     before.d/*.sieve                    # global "before" drop-ins, run ahead of every list's
+#                                         # own policy (filename order, like a systemd .d dir)
+#     after.d/*.sieve                     # global "after" drop-ins, run after every list's policy
+#     domains/<domain>/before.d/*.sieve   # as before.d/after.d, but only for lists whose posting
+#     domains/<domain>/after.d/*.sieve    # address is under <domain> (e.g. lists.example.com)
+#
+# The `.d` drop-ins let rules be layered as numbered files (10-abuse.sieve, 20-archive.sieve, …),
+# and still see the current list's membership (subscribers/posters/moderators). See the example
+# `sieve_scripts/` directory next to this file.
+sieve_scripts = "/etc/carriers/sieve_scripts"
 
 # Where archived posts are written, as `<archive_dir>/<list>/<timestamp>-<message-id>.eml`, when
 # a policy files a message into the `archive` pseudo-mailbox with `fileinto :copy "archive"` (the
 # message is stored exactly as received). Only needed if a policy actually archives; if unset,
 # such a `fileinto` is a no-op and logs a warning.
 # archive_dir = "/var/lib/carriers/archive"
-
-# Sieve scripts run for every list, wrapped around that list's own `policy` (see the README's
-# "Global policy" section). Each setting is a `.d` drop-in directory — every `*.sieve` file in it
-# runs, in filename order (like a systemd drop-in dir), so rules can be layered as numbered files
-# (10-abuse.sieve, 20-archive.sieve, …). Useful for checks that apply everywhere regardless of
-# list — e.g. a shared spam/abuse blocklist — while still seeing the current list's membership
-# (subscribers/posters/moderators). All of this is optional.
-[global_policy]
-# Directory whose scripts run ahead of every list's own policy. If left unset, a `global-before.d`
-# directory next to this config file is used automatically if one exists.
-# before = "/etc/carriers/global-before.d"
-# Directory whose scripts run after every list's own policy. If left unset, a `global-after.d`
-# directory next to this config file is used automatically if one exists.
-# after = "/etc/carriers/global-after.d"
-
-# Additional before/after drop-in directories scoped to one list domain, keyed by that domain —
-# e.g. only for lists posting to `@lists.example.com`. These run closer to the list's own policy
-# than the instance-wide `before`/`after` above: global before -> domain before -> the list's own
-# policy -> domain after -> global after. Unlike `before`/`after` above, there is no sibling
-# auto-discovery for these; they must be listed explicitly.
-# [global_policy.domains."lists.example.com"]
-# before = "/etc/carriers/lists.example.com-before.d"
-# after = "/etc/carriers/lists.example.com-after.d"
 
 [smarthost]
 # Outbound copies are relayed here. A local MTA (Postfix/Exim) is the intended target: it

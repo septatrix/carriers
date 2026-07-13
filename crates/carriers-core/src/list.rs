@@ -85,9 +85,10 @@ pub struct ListConfig {
     pub dkim2: KeyConfig,
 
     /// The moderation policy: either a built-in name (see [`crate::policy`]) or the name of a
-    /// custom `<name>.sieve` file in `policies_dir`. Built-in and custom policies are compiled
-    /// into the same [`crate::policy::PolicyEngine`] and looked up by this one name — there is
-    /// no separate configuration shape for "use a built-in mode" vs. "use a custom script".
+    /// custom `<name>.sieve` file in `sieve_scripts/moderation_policies/`. Built-in and custom
+    /// policies are compiled into the same [`crate::policy::PolicyEngine`] and looked up by this
+    /// one name — there is no separate configuration shape for "use a built-in mode" vs. "use a
+    /// custom script".
     #[serde(default = "default_policy")]
     pub policy: String,
 

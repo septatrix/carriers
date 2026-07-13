@@ -1,7 +1,6 @@
 //! Global daemon configuration, loaded from `carriers.toml`.
 
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -31,10 +30,22 @@ pub struct Config {
     /// Directory containing per-list `<name>.toml` files.
     pub lists_dir: PathBuf,
 
-    /// Directory of custom Sieve moderation policies (`<name>.sieve`). Required only if any
-    /// list's `policy` names a custom script rather than a built-in policy.
+    /// Root directory holding all of this deployment's Sieve scripts, in a fixed layout (see
+    /// [`crate::policy::PolicyEngine::load_root`]):
+    ///
+    /// ```text
+    /// <sieve_scripts>/
+    ///   moderation_policies/<name>.sieve    # per-list moderation policies, by file stem
+    ///   before.d/*.sieve                    # global "before" drop-ins
+    ///   after.d/*.sieve                     # global "after" drop-ins
+    ///   domains/<domain>/before.d/*.sieve   # per-domain before
+    ///   domains/<domain>/after.d/*.sieve    # per-domain after
+    /// ```
+    ///
+    /// Every part is optional. If unset, [`Config::load`] falls back to a `sieve_scripts`
+    /// directory next to this config file, if one exists.
     #[serde(default)]
-    pub policies_dir: Option<PathBuf>,
+    pub sieve_scripts: Option<PathBuf>,
 
     /// Directory under which archived posts are written, as `<archive_dir>/<list>/<file>.eml`,
     /// when a policy files a message into the `archive` pseudo-mailbox
@@ -42,53 +53,9 @@ pub struct Config {
     #[serde(default)]
     pub archive_dir: Option<PathBuf>,
 
-    /// Global and per-domain Sieve scripts run around every list's own `policy` — see the
-    /// README's "Global policy" section.
-    #[serde(default)]
-    pub global_policy: GlobalPolicyConfig,
-
     /// Bounce-handling thresholds.
     #[serde(default)]
     pub bounce: BounceConfig,
-}
-
-/// Sieve scripts that run for every list, before and/or after that list's own `policy` — see
-/// [`crate::policy::PolicyEngine`]. Each entry is a `.d` drop-in directory: every `*.sieve` file
-/// directly inside it is run, in filename order (like a systemd drop-in directory).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GlobalPolicyConfig {
-    /// Drop-in directory whose `*.sieve` files run (in filename order) ahead of every list's own
-    /// policy, regardless of the list's domain. Optional: if unset, [`Config::load`] falls back
-    /// to a `global-before.d` directory next to this config file, if one exists.
-    #[serde(default)]
-    pub before: Option<PathBuf>,
-
-    /// Drop-in directory whose `*.sieve` files run (in filename order) after every list's own
-    /// policy, regardless of the list's domain. Optional: if unset, [`Config::load`] falls back
-    /// to a `global-after.d` directory next to this config file, if one exists.
-    #[serde(default)]
-    pub after: Option<PathBuf>,
-
-    /// Additional before/after drop-in directories scoped to one list domain (e.g.
-    /// `lists.example.com`), keyed by that domain. These run in addition to `before`/`after`
-    /// above, closer to the list's own policy: `before` (global) -> `before` (this domain) ->
-    /// the list's own policy -> `after` (this domain) -> `after` (global). Unlike `before`/
-    /// `after` above, there is no sibling auto-discovery for these — they must be configured
-    /// explicitly.
-    #[serde(default)]
-    pub domains: HashMap<String, DomainPolicyConfig>,
-}
-
-/// Before/after Sieve drop-in directories scoped to one list domain — see
-/// [`GlobalPolicyConfig::domains`].
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DomainPolicyConfig {
-    #[serde(default)]
-    pub before: Option<PathBuf>,
-    #[serde(default)]
-    pub after: Option<PathBuf>,
 }
 
 /// Controls when a repeatedly-bouncing subscriber has delivery disabled.
@@ -159,21 +126,15 @@ fn default_smarthost_port() -> u16 {
 }
 
 impl Config {
-    /// Load and parse `path`. If `global_policy.before`/`.after` are not set, `global-before.d` /
-    /// `global-after.d` drop-in directories next to `path` are used automatically if present.
+    /// Load and parse `path`. If `sieve_scripts` is not set, a `sieve_scripts` directory next to
+    /// `path` is used automatically if present.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let mut config: Config = toml::from_str(&text)?;
-        if config.global_policy.before.is_none() {
-            let sibling = path.with_file_name("global-before.d");
+        if config.sieve_scripts.is_none() {
+            let sibling = path.with_file_name("sieve_scripts");
             if sibling.is_dir() {
-                config.global_policy.before = Some(sibling);
-            }
-        }
-        if config.global_policy.after.is_none() {
-            let sibling = path.with_file_name("global-after.d");
-            if sibling.is_dir() {
-                config.global_policy.after = Some(sibling);
+                config.sieve_scripts = Some(sibling);
             }
         }
         Ok(config)

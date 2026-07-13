@@ -15,8 +15,8 @@ subscribe_url = "https://lists.example.org/subscribe/dev"
 unsubscribe_oneclick = "https://lists.example.org/u/dev?token=..."
 
 # The moderation policy: a built-in name, or the name of a custom `<name>.sieve` file in
-# policies_dir (see examples/policies/). Held posts wait in a queue; review them with
-# `carriers moderate`.
+# `sieve_scripts/moderation_policies/` (see examples/sieve_scripts/moderation_policies/). Held
+# posts wait in a queue; review them with `carriers moderate`.
 #
 # NOTE: this must come before the [dkim]/[arc] tables below — a bare `key = value` line placed
 # after a [table] header belongs to that table, not to the list's top-level config.

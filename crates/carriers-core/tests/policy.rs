@@ -518,6 +518,66 @@ async fn full_chain_runs_in_order_before_at_intake_after_at_finalize() {
     );
 }
 
+/// `load_root` discovers the whole conventional layout — moderation policies plus the
+/// global/domain drop-ins — from one root, feeding the same builders the tests above drive by
+/// hand. This is the single knob `sieve_scripts` points at.
+#[tokio::test]
+async fn load_root_discovers_the_conventional_layout() {
+    let root = tempfile::tempdir().unwrap();
+
+    // moderation_policies/corporate.sieve — a named list policy that always approves.
+    let moderation = root.path().join("moderation_policies");
+    std::fs::create_dir_all(&moderation).unwrap();
+    write_policy(&moderation, "corporate", "keep;\n");
+
+    // before.d / after.d — global drop-ins. domains/<d>/after.d — a per-domain after script.
+    dropin(root.path(), "before.d", "# no opinion\n");
+    dropin(root.path(), "after.d", "# no opinion\n");
+    let domain_after = root.path().join("domains").join("lists.example.com");
+    std::fs::create_dir_all(&domain_after).unwrap();
+    dropin(
+        &domain_after,
+        "after.d",
+        "require \"fileinto\"; fileinto \"moderate\";\n",
+    );
+
+    let engine = PolicyEngine::load_root(root.path()).unwrap();
+
+    // Everything was discovered from the one root.
+    assert!(engine.contains("corporate"), "moderation policy discovered");
+    assert_eq!(engine.global_before_count(), 1);
+    assert_eq!(engine.global_after_count(), 1);
+    assert_eq!(engine.domains().collect::<Vec<_>>(), ["lists.example.com"]);
+
+    // And it behaves: the named policy approves at intake, and the discovered per-domain after
+    // script holds the message at distribution — only for its own domain.
+    assert_eq!(
+        eval_before(&engine, "lists.example.com", "alice@example.com").await,
+        PolicyDecision::Approve
+    );
+    assert_eq!(
+        eval_after(&engine, "lists.example.com", "alice@example.com").await,
+        PolicyDecision::Moderate
+    );
+    assert_eq!(
+        eval_after(&engine, "other.example.org", "alice@example.com").await,
+        PolicyDecision::Approve,
+        "the per-domain after script must not apply to a different domain"
+    );
+}
+
+/// An empty (or entirely absent) root is fine: `load_root` yields just the built-ins.
+#[tokio::test]
+async fn load_root_on_an_empty_root_is_just_the_builtins() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = PolicyEngine::load_root(root.path()).unwrap();
+    assert_eq!(engine.names().count(), 0);
+    assert_eq!(engine.global_before_count(), 0);
+    assert_eq!(engine.global_after_count(), 0);
+    assert_eq!(engine.domains().count(), 0);
+    assert!(engine.contains("open"), "built-ins are always present");
+}
+
 #[tokio::test]
 async fn fileinto_copy_archive_requests_an_archive_but_keeps_the_decision() {
     let dir = tempfile::tempdir().unwrap();

@@ -161,10 +161,11 @@ value is emitted as X.509 SubjectPublicKeyInfo (SPKI), the form Google/Microsoft
 
 Each list names its moderation policy with a single `policy = "<name>"` field (see
 [`examples/lists/dev.toml`](examples/lists/dev.toml)) — either one of the built-in policies, or
-the name of a custom `<name>.sieve` file the administrator places in `policies_dir` (see
-[`examples/policies/`](examples/policies/)). Both are compiled into the same engine at startup
-and looked up by the same name — there is no separate "use a built-in mode" vs. "use a custom
-script" configuration shape.
+the name of a custom `<name>.sieve` file the administrator places in
+`sieve_scripts/moderation_policies/` (see
+[`examples/sieve_scripts/moderation_policies/`](examples/sieve_scripts/moderation_policies/)).
+Both are compiled into the same engine at startup and looked up by the same name — there is no
+separate "use a built-in mode" vs. "use a custom script" configuration shape.
 
 | Built-in policy | Who may post directly | Everyone else |
 | --- | --- | --- |
@@ -181,9 +182,9 @@ Held posts wait in a per-list queue. Review them with `carriers moderate list`, 
 ### Sieve policies
 
 For richer rules, name a custom **Sieve** script instead of a built-in policy: `policy` becomes
-the file's name (without extension) and carriers compiles `<name>.sieve` from `policies_dir`.
-Policies are global and static — compiled once at startup. The script decides with ordinary
-Sieve actions:
+the file's name (without extension) and carriers compiles `<name>.sieve` from
+`sieve_scripts/moderation_policies/`. Policies are global and static — compiled once at startup.
+The script decides with ordinary Sieve actions:
 
 - `keep;` (or an empty script) — **approve** and distribute now
 - `fileinto "moderate";` — **hold** for moderation
@@ -310,19 +311,34 @@ binding the exact SMTP envelope at each one:
 
 ### Global policy
 
-Alongside each list's own `policy`, further optional Sieve scripts can run wrapped around it,
-configured under `[global_policy]` in `carriers.toml` — right after loop and duplicate
-detection, so they still have access to the current list's membership sets, same as a per-list
-script. Each setting is a **`.d` drop-in directory**: every `*.sieve` file directly inside it is
-run, in filename order (like a systemd drop-in directory), so you can layer rules by dropping in
-numbered files (`10-abuse.sieve`, `20-archive.sieve`, …). There are two axes:
+All of a deployment's Sieve lives under one root directory — `sieve_scripts` in `carriers.toml`
+(if unset, a `sieve_scripts` directory next to `carriers.toml` is used automatically). It has a
+fixed, auto-discovered layout — nothing else to configure:
+
+```text
+sieve_scripts/
+  moderation_policies/<name>.sieve    # per-list moderation policies, named by file stem;
+                                      # referenced by a list's `policy = "<name>"`
+  before.d/*.sieve                    # global "before" drop-ins
+  after.d/*.sieve                     # global "after" drop-ins
+  domains/<domain>/before.d/*.sieve   # per-domain before
+  domains/<domain>/after.d/*.sieve    # per-domain after
+```
+
+The named **moderation policies** are what a list's `policy` field selects (a built-in name, or a
+custom `<name>.sieve` here). The **drop-in directories** hold optional Sieve that runs wrapped
+around every list's own policy — right after loop and duplicate detection, so they still have
+access to the current list's membership sets, same as a per-list script. Each is a **`.d` drop-in
+directory**: every `*.sieve` file directly inside it runs, in filename order (like a systemd
+drop-in directory), so you can layer rules by dropping in numbered files (`10-abuse.sieve`,
+`20-archive.sieve`, …). There are two axes:
 
 - **before / after**: `before` scripts run at intake, ahead of the list's own policy, and help
   decide moderation. `after` scripts run later — at distribution time, *after* any moderation —
   as a final gate on a message that is actually about to go out.
-- **instance-wide / per-domain**: `[global_policy]`'s own `before`/`after` apply to *every* list
-  regardless of domain; `[global_policy.domains."some.domain"]` adds another before/after pair
-  that only applies to lists whose posting address is under that one domain.
+- **instance-wide / per-domain**: `before.d`/`after.d` apply to *every* list regardless of domain;
+  `domains/<domain>/{before,after}.d` add another before/after pair that only applies to lists
+  whose posting address is under that one domain.
 
 The full chain, for a list under a domain that has its own entry (each stage below being a whole
 drop-in directory, its scripts run in order):
@@ -338,15 +354,14 @@ now, hold it for moderation, discard it, or reject it. The **after** half (domai
 after) runs from `finalize` — for a message approved outright *or* one a moderator later
 approves — so it always gets the last word on what actually leaves the server.
 
-Any directory that isn't configured (or is empty) is skipped. Set paths explicitly, or for the
-two instance-wide directories, create a `global-before.d` / `global-after.d` directory next to
-`carriers.toml` and it's picked up automatically — domain-scoped directories have no such
-auto-discovery and must be listed explicitly. See
-[`examples/carriers.toml`](examples/carriers.toml)'s `[global_policy]` table, and the example
-drop-ins [`examples/global-before.d/`](examples/global-before.d) (instance-wide before),
-[`examples/global-after.d/`](examples/global-after.d) (instance-wide after), and
-[`examples/lists.example.com-after.d/`](examples/lists.example.com-after.d) (a domain-scoped
-after directory, for `lists.example.com`).
+Any subdirectory that is absent (or empty) is simply skipped — everything under `sieve_scripts` is
+optional and auto-discovered, so there is nothing to wire up per directory. See the example
+[`examples/sieve_scripts/`](examples/sieve_scripts) tree: a custom moderation policy
+([`moderation_policies/moderated-posters.sieve`](examples/sieve_scripts/moderation_policies/moderated-posters.sieve)),
+an instance-wide before drop-in ([`before.d/`](examples/sieve_scripts/before.d)), an instance-wide
+after drop-in ([`after.d/`](examples/sieve_scripts/after.d)), and a domain-scoped after directory
+for `lists.example.com`
+([`domains/lists.example.com/after.d/`](examples/sieve_scripts/domains/lists.example.com/after.d)).
 
 At every step, an implicit keep (nothing in the script matched) is *not* authoritative — it just
 means that script found no reason to act, so whatever was decided so far (`Approve`, unless an
@@ -501,10 +516,11 @@ Deferred / ideas:
   the RFC 8058 POST — routed through `MemberProvider` (an `unsubscribe`-style method) so it
   works uniformly against SQLite today and a future pull-based provider without special-casing
 - Support libeconf/UAPI style configuration (merging, overwriting, drop-ins etc)
-- Instead of manually specifying the drop-in directories for per-domain policies, just build a reverse domain
-  from the directory paths, e.g. `policies/com/example/lists.d/` for `lists.example.com`.
-  This is more intuitive and allows for a more natural directory structure, e.g. `policies/com/example/global-before.d/` for
-  instance-wide before scripts for `example.com` and all subdomains.
+- Per-domain drop-ins are now auto-discovered under `sieve_scripts/domains/<domain>/` (no manual
+  path config). A natural extension would be a reverse-domain *hierarchy*, e.g.
+  `sieve_scripts/domains/com/example/before.d/`, so a rule placed at `com/example` applies to
+  `example.com` *and all its subdomains* (`lists.example.com`, …) by inheritance — today each
+  domain is matched exactly.
 
 ## License
 
