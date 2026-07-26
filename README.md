@@ -382,6 +382,41 @@ discard, or reject. That is what makes `after` the place for last-word, domain- 
 checks (e.g. a compliance rule that must win regardless of what any single list's policy, or
 moderator, decided).
 
+### Debugging a policy offline with `carriers-sieve`
+
+Writing or changing a policy script shouldn't mean standing up the whole daemon to see what it
+does. The `carriers-sieve` dev crate (`crates/carriers-sieve`) runs a single Sieve policy against
+real messages on the command line and prints the decision it reaches — approve, moderate, discard,
+or reject — using the daemon's own evaluation logic, so the answer matches what a list would do.
+
+```sh
+# Run a policy against one message, supplying the envelope sender and membership lists the
+# script's :list tests need. Inputs can be .eml files, a directory of them, or an mbox file
+# (the format Thunderbird uses for local folders) — each contained message is evaluated.
+$ cargo run -p carriers-sieve -- \
+    examples/sieve_scripts/moderation_policies/moderated-posters.sieve message.eml \
+    --mail-from poster@example.com \
+    --list subscribers=alice@example.com --list posters=poster@example.com
+
+# Environment items scripts test via the "environment" extension (e.g. the vnd.carriers.dmarc_*
+# facts) come from the process environment by default and/or explicit --env flags:
+$ cargo run -p carriers-sieve -- policy.sieve message.eml --env vnd.carriers.dmarc_pass=false
+```
+
+Because the process environment is fed into the Sieve environment, a policy script can also be made
+directly runnable with a shebang — the `#!` line is an ordinary Sieve comment, so the same file is
+both a valid policy and an executable (`--exit-code` maps the decision to the process status):
+
+```sieve
+#!/usr/bin/env -S carriers-sieve --list-name announce --list posters=poster@example.com
+require ["envelope", "extlists", "reject"];
+if address :list "from" "posters" { keep; } else { reject "posters only"; }
+```
+
+```sh
+$ chmod +x announce.sieve && ./announce.sieve message.eml   # with carriers-sieve on $PATH
+```
+
 ## Bounce handling
 
 Every delivered copy carries a per-recipient VERP return path
@@ -474,8 +509,10 @@ otherwise (see "DMARC enforcement gate" above), an available From/Reply-To mungi
 (`fileinto "munge-from"`), VERP bounce processing with automatic delivery disabling, loop and
 duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, DKIM2
 verification/chain-extension (see "DKIM2 support"), smarthost delivery, flat-file lists + SQLite
-membership (independent subscriber, poster and moderator roles), key generation, and an
-in-process end-to-end test harness (`carriers-testkit`) with mock DNS + a scoring SMTP sink.
+membership (independent subscriber, poster and moderator roles), key generation, an
+in-process end-to-end test harness (`carriers-testkit`) with mock DNS + a scoring SMTP sink, and
+an offline policy runner (`carriers-sieve`) that evaluates a Sieve policy against `.eml`/mbox
+messages from the command line or as a script shebang (see "Debugging a policy offline" above).
 
 Deferred / ideas:
 

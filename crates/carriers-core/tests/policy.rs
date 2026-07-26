@@ -92,6 +92,48 @@ async fn sieve_policy_decides_approve_moderate_discard_reject() {
 }
 
 #[tokio::test]
+async fn evaluate_source_runs_an_ad_hoc_script() {
+    // `evaluate_source` compiles and runs a script that was never loaded as a named policy,
+    // yielding the same decisions as a loaded one. This is what `carriers-sieve` builds on.
+    let engine = PolicyEngine::new().unwrap();
+    let sets = sets(); // subscribers: alice; posters: bot
+    let eval = async |from: &str| {
+        engine
+            .evaluate_source("ad-hoc", POLICY.as_bytes(), "dev", LIST_ID, from, &message(from), &sets, &[])
+            .await
+            .unwrap()
+            .decision
+    };
+
+    assert_eq!(eval("alice@example.com").await, PolicyDecision::Approve);
+    assert_eq!(eval("bot@example.net").await, PolicyDecision::Moderate);
+    assert_eq!(eval("spammer@evil.example").await, PolicyDecision::Discard);
+    assert_eq!(
+        eval("mallory@evil.example").await,
+        PolicyDecision::Reject {
+            reason: "Only subscribers and posters may write to this list.".to_string()
+        }
+    );
+
+    // A malformed script surfaces a compile error rather than a decision.
+    assert!(
+        engine
+            .evaluate_source(
+                "broken",
+                b"if address :list \"from\" {\n",
+                "dev",
+                LIST_ID,
+                "anyone@example.com",
+                &message("anyone@example.com"),
+                &MembershipSets::default(),
+                &[],
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn empty_script_approves_by_default() {
     let dir = tempfile::tempdir().unwrap();
     write_policy(dir.path(), "allow", "# allow everything (implicit keep)\n");

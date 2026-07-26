@@ -630,6 +630,41 @@ impl PolicyEngine {
         .await
     }
 
+    /// Compile `source` and evaluate it as a single policy tier against `raw`, returning the same
+    /// [`PolicyOutcome`] a loaded, named policy would (see [`evaluate`](Self::evaluate)). Unlike
+    /// [`evaluate`](Self::evaluate) this does not require the script to be pre-loaded — it compiles
+    /// the given bytes on the spot — so it is meant for ad-hoc script debugging outside the daemon
+    /// (see the `carriers-sieve` binary), not for the daemon's own evaluation chain. `display_name`
+    /// is used only for error messages and Sieve's script cache key.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate_source(
+        &self,
+        display_name: &str,
+        source: &[u8],
+        list_name: &str,
+        list_id: &str,
+        mail_from: &str,
+        raw: &[u8],
+        sets: &MembershipSets,
+        extra_env: &[(&str, &str)],
+    ) -> Result<PolicyOutcome> {
+        let script = self
+            .engine
+            .compile(source)
+            .map_err(|e| Error::Config(format!("compiling `{display_name}`: {e}")))?;
+        self.run_tier(
+            &script,
+            display_name,
+            list_name,
+            list_id,
+            mail_from,
+            raw,
+            sets,
+            extra_env,
+        )
+        .await
+    }
+
     /// The "before" half of the policy chain, decided at intake: the global "before" drop-ins,
     /// this domain's "before" drop-ins, then the named list policy — each group of drop-ins run
     /// in filename order. See the module docs for how these compose. Any group that is empty
