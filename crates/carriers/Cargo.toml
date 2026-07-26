@@ -1,0 +1,27 @@
+[package]
+name = "carriers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A simple mailing list manager built for SPF/DKIM/DMARC/ARC compliance"
+
+[lib]
+name = "carriers"
+path = "src/lib.rs"
+
+[[bin]]
+name = "carriers"
+path = "src/main.rs"
+
+[dependencies]
+carriers-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+mail-send = "0.6.1"
+smtp-proto = "0.2.1"
+clap = { version = "4.6.1", features = ["derive"] }
+listenfd = "1.0.2"

@@ -1,0 +1,28 @@
+[package]
+name = "carriers-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core message pipeline for the carriers DMARC/ARC-compliant mailing list"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+mail-auth = { version = "0.11.1", features = ["arc", "generate"] }
+mail-parser = "0.11.4"
+mail-builder = "0.4.4"
+toml = "1.1.2"
+base64 = "0.22.1"
+rsa = { version = "0.9.10", features = ["std", "pem"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite"] }
+async-trait = "0.1.89"
+sieve-rs = "0.7.2"
+rustls-pki-types = "1.15"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros"] }
+tempfile = "3.13.0"

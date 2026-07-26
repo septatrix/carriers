@@ -1,0 +1,61 @@
+# A mailing list definition. The file name (dev.toml) is the list's short name.
+
+posting_address = "dev@lists.example.org"
+display_name = "Dev List"
+# List-Id namespace (RFC 2919). Defaults to the posting address with `@` replaced by `.`.
+# list_id = "dev.lists.example.org"
+
+owner = "owner@example.org"
+archive_url = "https://lists.example.org/archive/dev"
+help_url = "https://lists.example.org/help"
+subscribe_url = "https://lists.example.org/subscribe/dev"
+
+# One-click unsubscribe (RFC 8058), required by Google/Yahoo bulk-sender rules. When set,
+# carriers emits both `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`.
+unsubscribe_oneclick = "https://lists.example.org/u/dev?token=..."
+
+# The moderation policy: a built-in name, or the name of a custom `<name>.sieve` file in
+# `sieve_scripts/moderation_policies/` (see examples/sieve_scripts/moderation_policies/). Held
+# posts wait in a queue; review them with `carriers moderate`.
+#
+# NOTE: this must come before the [dkim]/[arc] tables below — a bare `key = value` line placed
+# after a [table] header belongs to that table, not to the list's top-level config.
+#
+# Built-in policies:
+#   "open"        - anyone may post; nothing is moderated
+#   "subscribers" - subscribers post directly; other senders are held for moderation (default)
+#   "posters"     - addresses flagged as posters post directly, independent of subscription
+#                   (subscribing does not grant posting rights, and vice versa); others are held
+#   "moderated"   - every post is held for moderation
+policy = "subscribers"
+# policy = "moderated-posters"  # a custom Sieve policy instead
+
+# Optional flat member seed file (one address per line, `#` comments). Import with
+# `carriers sync`.
+# members_file = "/var/lib/carriers/lists/dev/members"
+
+# DKIM signing key for the list domain. `carriers setup lists.example.org --algorithm ed25519
+# --out-dir /etc/carriers/keys/dev` generates this (and the [arc]/[dkim2] keys below, plus the
+# DNS zone file to publish) in one go — use a distinct --out-dir per list to keep selectors from
+# colliding.
+[dkim]
+selector = "dkim"
+key_file = "/etc/carriers/keys/dev/dkim.der"
+algorithm = "ed25519" # or "rsa"
+# domain = "lists.example.org"  # defaults to the posting address domain
+
+# ARC sealing key. Use a distinct selector from DKIM.
+[arc]
+selector = "arc"
+key_file = "/etc/carriers/keys/dev/arc.der"
+algorithm = "ed25519"
+
+# DKIM2 signing key (draft-ietf-dkim-dkim2-spec — see "DKIM2 support" in the README), configured
+# like [dkim]/[arc] above. It is not an on/off switch: the list always has this key available, but
+# only ever uses it to extend a DKIM2 chain the inbound message already carried, never to start
+# one of its own — most inbound mail today has no DKIM2 signature at all, so this key simply goes
+# unused for it.
+[dkim2]
+selector = "dkim2"
+key_file = "/etc/carriers/keys/dev/dkim2.der"
+algorithm = "ed25519"

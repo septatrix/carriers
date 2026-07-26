@@ -1,0 +1,25 @@
+; Example of the DNS zone carriers-testkit builds and serves as the source of truth for a run.
+;
+; The harness generates fresh Ed25519 keys each run and fills in the DKIM/ARC "p=" values, so
+; this file is illustrative — it shows the record shape the mock DNS answers. Everything is a
+; single flat, root-origin zone (all names are FQDNs), which lets one authority cover both the
+; author domain (example.com) and the list domain (lists.example.org). An SOA/NS for the root is
+; required for the authority to be valid; the nameserver name is never actually resolved because
+; the daemon and sink talk to the mock server directly.
+
+$TTL 60
+.                                   IN SOA  ns.mock.test. hostmaster.mock.test. 1 3600 600 86400 60
+.                                   IN NS   ns.mock.test.
+
+; --- Author domain (the message's From: domain) -----------------------------------------------
+auth._domainkey.example.com.        IN TXT  "v=DKIM1; k=ed25519; p=<author public key>"
+_dmarc.example.com.                 IN TXT  "v=DMARC1; p=reject; adkim=r; aspf=r"
+example.com.                        IN TXT  "v=spf1 ip4:127.0.0.1 -all"
+example.com.                        IN A    127.0.0.1
+
+; --- List domain (carriers signs and ARC-seals as this domain) --------------------------------
+dkim._domainkey.lists.example.org.  IN TXT  "v=DKIM1; k=ed25519; p=<list DKIM public key>"
+arc._domainkey.lists.example.org.   IN TXT  "v=DKIM1; k=ed25519; p=<list ARC public key>"
+_dmarc.lists.example.org.           IN TXT  "v=DMARC1; p=quarantine; adkim=r; aspf=r"
+lists.example.org.                  IN TXT  "v=spf1 ip4:127.0.0.1 -all"
+lists.example.org.                  IN A    127.0.0.1

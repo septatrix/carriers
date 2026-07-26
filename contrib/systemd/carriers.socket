@@ -1,0 +1,10 @@
+[Unit]
+Description=carriers mailing list ingress socket
+
+[Socket]
+# Port carriers accepts inbound LMTP/SMTP on. Point your front MTA's relay transport at this
+# port. When the socket is used, the `listen` value in carriers.toml is ignored.
+ListenStream=2400
+
+[Install]
+WantedBy=sockets.target

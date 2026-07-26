@@ -1,0 +1,27 @@
+[package]
+name = "carriers-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local end-to-end testing harness for carriers: mock DNS, a capturing/scoring SMTP sink, and a message sender"
+publish = false
+
+[[bin]]
+name = "carriers-testkit"
+path = "src/main.rs"
+
+[dependencies]
+carriers = { path = "../carriers" }
+carriers-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+clap = { version = "4.6.1", features = ["derive"] }
+mail-auth = { version = "0.11.1", features = ["arc"] }
+mail-send = "0.6.1"
+smtp-proto = "0.2.1"
+hickory-server = "0.26.1"
+hickory-proto = "0.26.1"
+tempfile = "3.13.0"

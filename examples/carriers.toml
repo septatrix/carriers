@@ -1,0 +1,62 @@
+# Global carriers configuration.
+# Copy to /etc/carriers/carriers.toml and adjust.
+
+# Hostname of this machine. Used as the EHLO/LHLO name, recorded in the sealed
+# Authentication-Results, and used as the `helo` identity when checking inbound SPF.
+hostname = "mx.lists.example.org"
+
+# Where the ingress listener binds. Put this behind your MTA on a trusted interface.
+# Ignored when started via systemd socket activation (the .socket unit's ListenStream wins).
+listen = "127.0.0.1:2400"
+
+# Ingress protocol: "lmtp" (recommended, when a front MTA relays to carriers) or "smtp".
+protocol = "lmtp"
+
+# SQLite database holding membership and operational state (dedup, etc.).
+db_path = "/var/lib/carriers/carriers.db"
+
+# Directory of per-list `<name>.toml` files.
+lists_dir = "/etc/carriers/lists"
+
+# Root directory holding all of this deployment's Sieve scripts, in a fixed layout (see the
+# README's "Global policy" section). If left unset, a `sieve_scripts` directory next to this
+# config file is used automatically if one exists. All of it is optional.
+#
+#   sieve_scripts/
+#     moderation_policies/<name>.sieve    # per-list moderation policies, named by file stem;
+#                                         # referenced by a list's `policy = "<name>"`
+#     before.d/*.sieve                    # global "before" drop-ins, run ahead of every list's
+#                                         # own policy (filename order, like a systemd .d dir)
+#     after.d/*.sieve                     # global "after" drop-ins, run after every list's policy
+#     domains/<domain>/before.d/*.sieve   # as before.d/after.d, but only for lists whose posting
+#     domains/<domain>/after.d/*.sieve    # address is under <domain> (e.g. lists.example.com)
+#
+# The `.d` drop-ins let rules be layered as numbered files (10-abuse.sieve, 20-archive.sieve, …),
+# and still see the current list's membership (subscribers/posters/moderators). See the example
+# `sieve_scripts/` directory next to this file.
+sieve_scripts = "/etc/carriers/sieve_scripts"
+
+# Where archived posts are written, as `<archive_dir>/<list>/<timestamp>-<message-id>.eml`, when
+# a policy files a message into the `archive` pseudo-mailbox with `fileinto :copy "archive"` (the
+# message is stored exactly as received). Only needed if a policy actually archives; if unset,
+# such a `fileinto` is a no-op and logs a warning.
+# archive_dir = "/var/lib/carriers/archive"
+
+[smarthost]
+# Outbound copies are relayed here. A local MTA (Postfix/Exim) is the intended target: it
+# owns queueing, retries, MX resolution and outbound TLS.
+host = "127.0.0.1"
+port = 25
+# Implicit TLS (SMTPS). Leave false for a local relay.
+implicit_tls = false
+# Permit plaintext delivery. Only sensible for a trusted local relay (e.g. 127.0.0.1).
+allow_plaintext = true
+
+# Bounce handling (optional; defaults shown). Delivery copies use a per-recipient VERP
+# return path, so bounces come back addressed to the failing subscriber. Each bounce adds a
+# weight to that subscriber's score; when it reaches `threshold`, delivery to them is disabled
+# until re-enabled with `carriers member enable <list> <address>`.
+[bounce]
+threshold = 5.0    # score at which delivery is disabled
+hard_weight = 3.0  # weight of a permanent (5.x.x) failure
+soft_weight = 1.0  # weight of a transient (4.x.x) failure
