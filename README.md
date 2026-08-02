@@ -416,6 +416,12 @@ message.eml: moderate  [archive]
       - X-Spam-Flag: NO
 ```
 
+Each action is also emitted as a `debug`-level log event the moment the engine takes it, so you can
+watch them stream by live rather than as an end-of-run summary: pass `-v` (logs to stderr, results
+still to stdout), or set `RUST_LOG`. The **daemon** emits the very same events — run it with
+`RUST_LOG=carriers_core::sieve_engine=debug` to see every action each policy takes on live mail,
+since both the runner and the server drive the one Sieve engine.
+
 Because the process environment is fed into the Sieve environment, a policy script can also be made
 directly runnable with a shebang — the `#!` line is an ordinary Sieve comment, so the same file is
 both a valid policy and an executable (`--exit-code` maps the decision to the process status):

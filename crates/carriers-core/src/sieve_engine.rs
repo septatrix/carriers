@@ -207,13 +207,19 @@ impl SieveEngine {
             instance.set_env_variable((*key).to_string(), (*value).to_string());
         }
 
-        // Records an action into the trace, if tracing is on. A no-op otherwise.
+        // Handle one action the script took: log it as it happens (a `debug`-level event, so it
+        // costs nothing unless someone is listening — this is what lets the daemon surface a
+        // script's actions under debug logging), then append it to the trace if one is being
+        // collected. The action is the primitive; [`SieveRun`] is its fold (built inline below),
+        // and [`run_traced`](Self::run_traced) hands the same list back for a caller to iterate.
         macro_rules! record {
-            ($action:expr) => {
+            ($action:expr) => {{
+                let action = $action;
+                tracing::debug!(target: "carriers_core::sieve_engine", script = name, ?action, "sieve action");
                 if let Some(t) = trace.as_deref_mut() {
-                    t.push($action);
+                    t.push(action);
                 }
-            };
+            }};
         }
 
         let mut outcome = None;

@@ -94,6 +94,12 @@ struct Cli {
     /// With several messages, the most severe decision wins. Off by default (always exit 0).
     #[arg(long)]
     exit_code: bool,
+
+    /// Log each action to stderr as the engine takes it (the same `debug`-level events the daemon
+    /// emits). Independent of `--trace`, which prints a per-message summary to stdout at the end.
+    /// `RUST_LOG` still overrides the log filter if set.
+    #[arg(long, short = 'v')]
+    verbose: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -116,14 +122,21 @@ struct JsonResult<'a> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // `-v` bumps the engine's per-action `debug` events into view, so you can watch the script's
+    // actions stream by as they happen; `RUST_LOG` overrides this if set.
+    let default_filter = if cli.verbose {
+        "carriers_sieve=info,carriers_core::sieve_engine=debug,carriers_core=warn"
+    } else {
+        "carriers_sieve=info,carriers_core=warn"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "carriers_sieve=info,carriers_core=warn".into()),
+                .unwrap_or_else(|_| default_filter.into()),
         )
         .init();
-
-    let cli = Cli::parse();
 
     if cli.inputs.is_empty() {
         bail!(
@@ -147,6 +160,8 @@ async fn main() -> Result<()> {
 
     let engine = PolicyEngine::new().context("initialising the Sieve policy engine")?;
 
+    // Evaluate each message in turn. In human mode we print its result as soon as it's ready, so
+    // output streams message-by-message; JSON is one document, so it's collected and printed once.
     let mut traces = Vec::with_capacity(messages.len());
     for msg in &messages {
         let trace = engine
@@ -162,13 +177,16 @@ async fn main() -> Result<()> {
             )
             .await
             .with_context(|| format!("evaluating {}", msg.label))?;
+        if !cli.json {
+            print_message(&msg.label, &msg.raw, &trace, cli.trace);
+        }
         traces.push(trace);
     }
 
     if cli.json {
         print_json(&messages, &traces, cli.trace)?;
-    } else {
-        print_human(&messages, &traces, cli.trace);
+    } else if messages.len() > 1 {
+        print_summary(&traces);
     }
 
     if cli.exit_code {
@@ -263,63 +281,64 @@ fn side_effects(outcome: &PolicyOutcome) -> Vec<&'static str> {
     flags
 }
 
-fn print_human(messages: &[Message], traces: &[PolicyTrace], show_trace: bool) {
-    for (msg, trace) in messages.iter().zip(traces) {
-        let outcome = &trace.outcome;
-        let decision = match &outcome.decision {
-            PolicyDecision::Reject { reason } => format!("reject: {reason}"),
-            other => decision_word(other).to_string(),
-        };
-        let flags = side_effects(outcome);
-        let suffix = if flags.is_empty() {
-            String::new()
+/// Print one message's result: the decision line, and — with `show_trace` — the ordered action
+/// list plus a header diff of any edits the script made.
+fn print_message(label: &str, raw: &[u8], trace: &PolicyTrace, show_trace: bool) {
+    let outcome = &trace.outcome;
+    let decision = match &outcome.decision {
+        PolicyDecision::Reject { reason } => format!("reject: {reason}"),
+        other => decision_word(other).to_string(),
+    };
+    let flags = side_effects(outcome);
+    let suffix = if flags.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", flags.join(", "))
+    };
+    println!("{label}: {decision}{suffix}");
+
+    if show_trace {
+        if trace.actions.is_empty() {
+            println!("    actions: (none — implicit keep)");
         } else {
-            format!("  [{}]", flags.join(", "))
-        };
-        println!("{}: {decision}{suffix}", msg.label);
-
-        if show_trace {
-            if trace.actions.is_empty() {
-                println!("    actions: (none — implicit keep)");
-            } else {
-                println!("    actions:");
-                for action in &trace.actions {
-                    println!("      {}", action_line(action));
-                }
+            println!("    actions:");
+            for action in &trace.actions {
+                println!("      {}", action_line(action));
             }
-            if let Some(rewritten) = &trace.rewritten {
-                let (added, removed) = header_diff(&msg.raw, rewritten);
-                if !added.is_empty() || !removed.is_empty() {
-                    println!("    header changes:");
-                    for h in &added {
-                        println!("      + {h}");
-                    }
-                    for h in &removed {
-                        println!("      - {h}");
-                    }
+        }
+        if let Some(rewritten) = &trace.rewritten {
+            let (added, removed) = header_diff(raw, rewritten);
+            if !added.is_empty() || !removed.is_empty() {
+                println!("    header changes:");
+                for h in &added {
+                    println!("      + {h}");
+                }
+                for h in &removed {
+                    println!("      - {h}");
                 }
             }
         }
     }
+}
 
-    if messages.len() > 1 {
-        let mut approve = 0;
-        let mut moderate = 0;
-        let mut discard = 0;
-        let mut reject = 0;
-        for trace in traces {
-            match trace.outcome.decision {
-                PolicyDecision::Approve => approve += 1,
-                PolicyDecision::Moderate => moderate += 1,
-                PolicyDecision::Discard => discard += 1,
-                PolicyDecision::Reject { .. } => reject += 1,
-            }
+/// Print the trailing tally across all evaluated messages.
+fn print_summary(traces: &[PolicyTrace]) {
+    let mut approve = 0;
+    let mut moderate = 0;
+    let mut discard = 0;
+    let mut reject = 0;
+    for trace in traces {
+        match trace.outcome.decision {
+            PolicyDecision::Approve => approve += 1,
+            PolicyDecision::Moderate => moderate += 1,
+            PolicyDecision::Discard => discard += 1,
+            PolicyDecision::Reject { .. } => reject += 1,
         }
-        println!(
-            "\n{} message(s): {approve} approve, {moderate} moderate, {discard} discard, {reject} reject",
-            messages.len()
-        );
     }
+    println!(
+        "\n{} message(s): {approve} approve, {moderate} moderate, {discard} discard, {reject} reject",
+        traces.len()
+    );
 }
 
 fn print_json(messages: &[Message], traces: &[PolicyTrace], show_trace: bool) -> Result<()> {
