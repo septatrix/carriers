@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use carriers_core::policy::{MembershipSets, PolicyDecision, PolicyEngine, PolicyOutcome};
-use carriers_core::sieve_engine::{DuplicateStore, NoDuplicates};
+use carriers_core::sieve_engine::{DuplicateStore, NoDuplicates, SieveAction};
 
 /// A stand-in `List-Id` for the tests; the built-in checks don't run through `evaluate*`, so its
 /// exact value is irrelevant to these.
@@ -89,6 +89,103 @@ async fn sieve_policy_decides_approve_moderate_discard_reject() {
             reason: "Only subscribers and posters may write to this list.".to_string()
         }
     );
+}
+
+#[tokio::test]
+async fn evaluate_source_runs_an_ad_hoc_script() {
+    // `evaluate_source` compiles and runs a script that was never loaded as a named policy,
+    // yielding the same decisions as a loaded one. This is what `carriers-sieve` builds on.
+    let engine = PolicyEngine::new().unwrap();
+    let sets = sets(); // subscribers: alice; posters: bot
+    let eval = async |from: &str| {
+        engine
+            .evaluate_source("ad-hoc", POLICY.as_bytes(), "dev", LIST_ID, from, &message(from), &sets, &[])
+            .await
+            .unwrap()
+            .decision
+    };
+
+    assert_eq!(eval("alice@example.com").await, PolicyDecision::Approve);
+    assert_eq!(eval("bot@example.net").await, PolicyDecision::Moderate);
+    assert_eq!(eval("spammer@evil.example").await, PolicyDecision::Discard);
+    assert_eq!(
+        eval("mallory@evil.example").await,
+        PolicyDecision::Reject {
+            reason: "Only subscribers and posters may write to this list.".to_string()
+        }
+    );
+
+    // A malformed script surfaces a compile error rather than a decision.
+    assert!(
+        engine
+            .evaluate_source(
+                "broken",
+                b"if address :list \"from\" {\n",
+                "dev",
+                LIST_ID,
+                "anyone@example.com",
+                &message("anyone@example.com"),
+                &MembershipSets::default(),
+                &[],
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn trace_source_records_every_action_and_the_rewrite() {
+    // A script that edits a header, files a copy, and keeps: `trace_source` should surface all
+    // three actions in order plus the rewritten message, while the interpreted outcome is an
+    // ordinary approval with the archive side effect.
+    const SCRIPT: &str = r#"
+require ["editheader", "fileinto", "copy"];
+addheader "X-Traced" "yes";
+fileinto :copy "archive";
+keep;
+"#;
+    let engine = PolicyEngine::new().unwrap();
+    let trace = engine
+        .trace_source(
+            "traced",
+            SCRIPT.as_bytes(),
+            "dev",
+            LIST_ID,
+            "someone@example.com",
+            &message("someone@example.com"),
+            &MembershipSets::default(),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(trace.outcome.decision, PolicyDecision::Approve);
+    assert!(trace.outcome.archive);
+
+    assert!(
+        trace.actions.contains(&SieveAction::EditedMessage),
+        "expected an EditedMessage action, got {:?}",
+        trace.actions
+    );
+    assert!(
+        trace
+            .actions
+            .iter()
+            .any(|a| matches!(a, SieveAction::FileInto { folder, .. } if folder == "archive")),
+        "expected a FileInto \"archive\" action, got {:?}",
+        trace.actions
+    );
+    assert!(
+        trace
+            .actions
+            .iter()
+            .any(|a| matches!(a, SieveAction::Keep { .. })),
+        "expected a Keep action, got {:?}",
+        trace.actions
+    );
+
+    let rewritten = String::from_utf8(trace.rewritten.expect("message was edited")).unwrap();
+    assert!(rewritten.contains("X-Traced: yes"));
 }
 
 #[tokio::test]

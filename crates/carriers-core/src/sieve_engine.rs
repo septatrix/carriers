@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sieve::{Compiler, Envelope, Event, Input, Runtime, Script, Sieve};
+use sieve::{Compiler, Envelope, Event, Input, Recipient, Runtime, Script, Sieve};
 
 use crate::error::{Error, Result};
 
@@ -56,6 +56,37 @@ pub enum SieveOutcome {
     Discard,
     /// `reject "reason";` / `ereject "reason";` — explicitly refuse, with a reason.
     Reject { reason: String },
+}
+
+/// One action a Sieve script performed, recorded in the order it happened for tracing/debugging
+/// (see [`SieveEngine::run_traced`]). This is the raw Sieve-level action, *before* any
+/// carriers-specific interpretation of `fileinto` pseudo-mailboxes or `discard`/`reject` (that
+/// meaning is added in [`crate::policy`]); it lets a caller see everything a script did, including
+/// actions the [`SieveOutcome`]/[`SieveRun`] summary deliberately drops (`redirect`, `notify`,
+/// explicit `keep`, envelope edits).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SieveAction {
+    /// `keep;` — retain the message, optionally tagging it with the given IMAP flags.
+    Keep { flags: Vec<String> },
+    /// `discard;`
+    Discard,
+    /// `reject "reason";` — `extended` is true for the `ereject` form (RFC 5429).
+    Reject { extended: bool, reason: String },
+    /// `fileinto [:create] [:flags …] "folder";`
+    FileInto {
+        folder: String,
+        flags: Vec<String>,
+        create: bool,
+    },
+    /// `redirect "addr";` (RFC 5228) and its extensions — the message is (also) sent onward.
+    Redirect { recipient: String },
+    /// `notify "method";` (RFC 5435).
+    Notify { method: String, message: String },
+    /// A change to the message envelope (e.g. `setenvelope`), naming the field and its new value.
+    SetEnvelope { field: String, value: String },
+    /// `addheader`/`deleteheader` (RFC 5293) rebuilt the message. The resulting bytes are in
+    /// [`SieveRun::message`]; compare them with the input to see exactly which headers changed.
+    EditedMessage,
 }
 
 /// The result of running one Sieve script.
@@ -116,12 +147,79 @@ impl SieveEngine {
         lists: &dyn ExternalLists,
         duplicates: &dyn DuplicateStore,
     ) -> Result<SieveRun> {
+        self.run_inner(
+            name, script, raw, mail_from, env_vars, lists, duplicates, None,
+        )
+        .await
+    }
+
+    /// Like [`run`](Self::run), but additionally returns every action the script performed, in
+    /// order (see [`SieveAction`]) — including ones the [`SieveRun`] summary drops (`redirect`,
+    /// `notify`, explicit `keep`, envelope edits). For debugging/tracing a script's full behaviour;
+    /// the daemon uses [`run`](Self::run).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_traced(
+        &self,
+        name: &str,
+        script: &Arc<Sieve>,
+        raw: &[u8],
+        mail_from: &str,
+        env_vars: &[(&str, &str)],
+        lists: &dyn ExternalLists,
+        duplicates: &dyn DuplicateStore,
+    ) -> Result<(SieveRun, Vec<SieveAction>)> {
+        let mut trace = Vec::new();
+        let run = self
+            .run_inner(
+                name,
+                script,
+                raw,
+                mail_from,
+                env_vars,
+                lists,
+                duplicates,
+                Some(&mut trace),
+            )
+            .await?;
+        Ok((run, trace))
+    }
+
+    /// Shared driver for [`run`](Self::run)/[`run_traced`](Self::run_traced). When `trace` is
+    /// `Some`, every action the script takes is appended to it in order; otherwise the event loop
+    /// behaves exactly as before, so the daemon's path is unchanged.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inner(
+        &self,
+        name: &str,
+        script: &Arc<Sieve>,
+        raw: &[u8],
+        mail_from: &str,
+        env_vars: &[(&str, &str)],
+        lists: &dyn ExternalLists,
+        duplicates: &dyn DuplicateStore,
+        mut trace: Option<&mut Vec<SieveAction>>,
+    ) -> Result<SieveRun> {
         let mut instance = self.runtime.filter(raw);
         if !mail_from.is_empty() {
             instance.set_envelope(Envelope::From, mail_from.to_string());
         }
         for (key, value) in env_vars {
             instance.set_env_variable((*key).to_string(), (*value).to_string());
+        }
+
+        // Handle one action the script took: log it as it happens (a `debug`-level event, so it
+        // costs nothing unless someone is listening — this is what lets the daemon surface a
+        // script's actions under debug logging), then append it to the trace if one is being
+        // collected. The action is the primitive; [`SieveRun`] is its fold (built inline below),
+        // and [`run_traced`](Self::run_traced) hands the same list back for a caller to iterate.
+        macro_rules! record {
+            ($action:expr) => {{
+                let action = $action;
+                tracing::debug!(target: "carriers_core::sieve_engine", script = name, ?action, "sieve action");
+                if let Some(t) = trace.as_deref_mut() {
+                    t.push(action);
+                }
+            }};
         }
 
         let mut outcome = None;
@@ -158,24 +256,64 @@ impl SieveEngine {
                 // author's DKIM signature intact.
                 Event::CreatedMessage { message: bytes, .. } => {
                     message = Some(bytes);
+                    record!(SieveAction::EditedMessage);
+                    true.into()
+                }
+                Event::Keep { flags, .. } => {
+                    record!(SieveAction::Keep { flags });
                     true.into()
                 }
                 Event::Discard => {
                     outcome.get_or_insert(SieveOutcome::Discard);
+                    record!(SieveAction::Discard);
                     true.into()
                 }
-                Event::Reject { reason, .. } => {
-                    outcome.get_or_insert(SieveOutcome::Reject { reason });
+                Event::Reject { reason, extended } => {
+                    outcome.get_or_insert(SieveOutcome::Reject {
+                        reason: reason.clone(),
+                    });
+                    record!(SieveAction::Reject { extended, reason });
                     true.into()
                 }
                 // `fileinto` is a side channel, not a terminal action: record the destination and
                 // keep running, so the script can both file the message and reach a `keep`,
                 // `discard`, or `reject` afterwards.
-                Event::FileInto { folder, .. } => {
+                Event::FileInto {
+                    folder,
+                    flags,
+                    create,
+                    ..
+                } => {
+                    record!(SieveAction::FileInto {
+                        folder: folder.clone(),
+                        flags,
+                        create,
+                    });
                     filed_into.push(folder);
                     true.into()
                 }
-                // Keep and any other action: leave the (default) outcome as-is.
+                // `redirect` — the message is sent onward to another recipient.
+                Event::SendMessage { recipient, .. } => {
+                    record!(SieveAction::Redirect {
+                        recipient: recipient_str(&recipient),
+                    });
+                    true.into()
+                }
+                Event::Notify {
+                    method, message: m, ..
+                } => {
+                    record!(SieveAction::Notify { method, message: m });
+                    true.into()
+                }
+                Event::SetEnvelope { envelope, value } => {
+                    record!(SieveAction::SetEnvelope {
+                        field: format!("{envelope:?}"),
+                        value,
+                    });
+                    true.into()
+                }
+                // Anything else (e.g. an external `Function` call, which carriers never registers):
+                // leave the outcome as-is and keep running.
                 _ => true.into(),
             };
         }
@@ -185,5 +323,14 @@ impl SieveEngine {
             message,
             filed_into,
         })
+    }
+}
+
+/// Render a redirect recipient for a trace line.
+fn recipient_str(recipient: &Recipient) -> String {
+    match recipient {
+        Recipient::Address(addr) => addr.clone(),
+        Recipient::List(list) => format!("list:{list}"),
+        Recipient::Group(group) => group.join(", "),
     }
 }
