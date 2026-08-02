@@ -401,6 +401,19 @@ $ cargo run -p carriers-sieve -- \
 # Environment items scripts test via the "environment" extension (e.g. the vnd.carriers.dmarc_*
 # facts) come from the process environment by default and/or explicit --env flags:
 $ cargo run -p carriers-sieve -- policy.sieve message.eml --env vnd.carriers.dmarc_pass=false
+
+# --trace additionally lists every action the script performed, in order (keep, fileinto,
+# redirect, notify, envelope edits) and — when it edited headers — exactly which headers changed:
+$ cargo run -p carriers-sieve -- policy.sieve message.eml --trace
+message.eml: moderate  [archive]
+    actions:
+      edited message headers
+      fileinto "archive"
+      redirect audit@example.com
+      fileinto "moderate"
+    header changes:
+      + X-Carriers-Debug: traced
+      - X-Spam-Flag: NO
 ```
 
 Because the process environment is fed into the Sieve environment, a policy script can also be made

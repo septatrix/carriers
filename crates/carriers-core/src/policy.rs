@@ -118,7 +118,7 @@ use sieve::Sieve;
 
 use crate::error::{Error, Result};
 use crate::sieve_engine::{
-    DuplicateStore, ExternalLists, NoDuplicates, SieveEngine, SieveOutcome, SieveRun,
+    DuplicateStore, ExternalLists, NoDuplicates, SieveAction, SieveEngine, SieveOutcome, SieveRun,
 };
 
 /// External list names exposed to policy scripts via the Sieve `:list` match.
@@ -195,6 +195,16 @@ pub struct PolicyOutcome {
     /// signing (see [`PolicyEngine::apply_munge_from`]). Nothing built-in sets this yet; it is an
     /// available mechanism for custom scripts. Same "after"-tier-only caveat as `no_own_dkim`.
     pub munge_from: bool,
+}
+
+/// The full record of running one script against a message, for debugging: the interpreted
+/// [`PolicyOutcome`], every raw Sieve action the script performed in order (see [`SieveAction`]),
+/// and the rewritten message bytes if it edited headers (`None` if it left them untouched). See
+/// [`PolicyEngine::trace_source`] and the `carriers-sieve` binary.
+pub struct PolicyTrace {
+    pub outcome: PolicyOutcome,
+    pub actions: Vec<SieveAction>,
+    pub rewritten: Option<Vec<u8>>,
 }
 
 /// `fileinto` pseudo-mailbox names that hold a message for moderation.
@@ -663,6 +673,50 @@ impl PolicyEngine {
             extra_env,
         )
         .await
+    }
+
+    /// Like [`evaluate_source`](Self::evaluate_source), but also returns everything the script did:
+    /// the interpreted [`PolicyOutcome`], the ordered list of raw Sieve actions it performed (see
+    /// [`SieveAction`]), and the rewritten message bytes if it edited headers. For inspecting a
+    /// script's full behaviour (see the `carriers-sieve` binary), not part of the daemon's chain.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn trace_source(
+        &self,
+        display_name: &str,
+        source: &[u8],
+        list_name: &str,
+        list_id: &str,
+        mail_from: &str,
+        raw: &[u8],
+        sets: &MembershipSets,
+        extra_env: &[(&str, &str)],
+    ) -> Result<PolicyTrace> {
+        let script = self
+            .engine
+            .compile(source)
+            .map_err(|e| Error::Config(format!("compiling `{display_name}`: {e}")))?;
+        // Mirror `run_script`'s environment assembly: the list identity first, then the caller's
+        // extra items.
+        let mut env = vec![(ENV_LIST, list_name), (ENV_LIST_ID, list_id)];
+        env.extend_from_slice(extra_env);
+        let (run, actions) = self
+            .engine
+            .run_traced(
+                display_name,
+                &script,
+                raw,
+                mail_from,
+                &env,
+                sets,
+                &NoDuplicates,
+            )
+            .await?;
+        let rewritten = run.message.clone();
+        Ok(PolicyTrace {
+            outcome: outcome_from_run(run),
+            actions,
+            rewritten,
+        })
     }
 
     /// The "before" half of the policy chain, decided at intake: the global "before" drop-ins,

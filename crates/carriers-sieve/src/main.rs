@@ -24,10 +24,11 @@ use clap::Parser;
 
 use carriers_core::policy::{
     LIST_MODERATORS, LIST_POSTERS, LIST_SUBSCRIBERS, MembershipSets, PolicyDecision, PolicyEngine,
-    PolicyOutcome,
+    PolicyOutcome, PolicyTrace,
 };
+use carriers_core::sieve_engine::SieveAction;
 
-use input::Format;
+use input::{Format, Message};
 
 #[derive(Parser)]
 #[command(
@@ -79,6 +80,12 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Auto)]
     format: Format,
 
+    /// Show the full ordered list of actions each script performed (keep, fileinto, redirect,
+    /// notify, envelope and header edits) and, when it edited headers, exactly which headers
+    /// changed. Without it, only the final decision is printed.
+    #[arg(long, short = 't')]
+    trace: bool,
+
     /// Emit results as a JSON array instead of human-readable text.
     #[arg(long)]
     json: bool,
@@ -98,6 +105,13 @@ struct JsonResult<'a> {
     archive: bool,
     no_dkim: bool,
     munge_from: bool,
+    /// The ordered action trace, present only with `--trace`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    added_headers: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed_headers: Vec<String>,
 }
 
 #[tokio::main]
@@ -133,10 +147,10 @@ async fn main() -> Result<()> {
 
     let engine = PolicyEngine::new().context("initialising the Sieve policy engine")?;
 
-    let mut results = Vec::with_capacity(messages.len());
+    let mut traces = Vec::with_capacity(messages.len());
     for msg in &messages {
-        let outcome = engine
-            .evaluate_source(
+        let trace = engine
+            .trace_source(
                 &script_name,
                 &source,
                 &cli.list_name,
@@ -148,19 +162,19 @@ async fn main() -> Result<()> {
             )
             .await
             .with_context(|| format!("evaluating {}", msg.label))?;
-        results.push((msg.label.as_str(), outcome));
+        traces.push(trace);
     }
 
     if cli.json {
-        print_json(&results)?;
+        print_json(&messages, &traces, cli.trace)?;
     } else {
-        print_human(&results);
+        print_human(&messages, &traces, cli.trace);
     }
 
     if cli.exit_code {
-        let code = results
+        let code = traces
             .iter()
-            .map(|(_, o)| decision_code(&o.decision))
+            .map(|t| decision_code(&t.outcome.decision))
             .max()
             .unwrap_or(0);
         std::process::exit(code);
@@ -249,8 +263,9 @@ fn side_effects(outcome: &PolicyOutcome) -> Vec<&'static str> {
     flags
 }
 
-fn print_human(results: &[(&str, PolicyOutcome)]) {
-    for (label, outcome) in results {
+fn print_human(messages: &[Message], traces: &[PolicyTrace], show_trace: bool) {
+    for (msg, trace) in messages.iter().zip(traces) {
+        let outcome = &trace.outcome;
         let decision = match &outcome.decision {
             PolicyDecision::Reject { reason } => format!("reject: {reason}"),
             other => decision_word(other).to_string(),
@@ -261,16 +276,39 @@ fn print_human(results: &[(&str, PolicyOutcome)]) {
         } else {
             format!("  [{}]", flags.join(", "))
         };
-        println!("{label}: {decision}{suffix}");
+        println!("{}: {decision}{suffix}", msg.label);
+
+        if show_trace {
+            if trace.actions.is_empty() {
+                println!("    actions: (none — implicit keep)");
+            } else {
+                println!("    actions:");
+                for action in &trace.actions {
+                    println!("      {}", action_line(action));
+                }
+            }
+            if let Some(rewritten) = &trace.rewritten {
+                let (added, removed) = header_diff(&msg.raw, rewritten);
+                if !added.is_empty() || !removed.is_empty() {
+                    println!("    header changes:");
+                    for h in &added {
+                        println!("      + {h}");
+                    }
+                    for h in &removed {
+                        println!("      - {h}");
+                    }
+                }
+            }
+        }
     }
 
-    if results.len() > 1 {
+    if messages.len() > 1 {
         let mut approve = 0;
         let mut moderate = 0;
         let mut discard = 0;
         let mut reject = 0;
-        for (_, o) in results {
-            match o.decision {
+        for trace in traces {
+            match trace.outcome.decision {
                 PolicyDecision::Approve => approve += 1,
                 PolicyDecision::Moderate => moderate += 1,
                 PolicyDecision::Discard => discard += 1,
@@ -279,26 +317,178 @@ fn print_human(results: &[(&str, PolicyOutcome)]) {
         }
         println!(
             "\n{} message(s): {approve} approve, {moderate} moderate, {discard} discard, {reject} reject",
-            results.len()
+            messages.len()
         );
     }
 }
 
-fn print_json(results: &[(&str, PolicyOutcome)]) -> Result<()> {
-    let json: Vec<JsonResult> = results
+fn print_json(messages: &[Message], traces: &[PolicyTrace], show_trace: bool) -> Result<()> {
+    let json: Vec<JsonResult> = messages
         .iter()
-        .map(|(label, outcome)| JsonResult {
-            label,
-            decision: decision_word(&outcome.decision),
-            reason: match &outcome.decision {
-                PolicyDecision::Reject { reason } => Some(reason.as_str()),
-                _ => None,
-            },
-            archive: outcome.archive,
-            no_dkim: outcome.no_own_dkim,
-            munge_from: outcome.munge_from,
+        .zip(traces)
+        .map(|(msg, trace)| {
+            let outcome = &trace.outcome;
+            let (added_headers, removed_headers) = match (show_trace, &trace.rewritten) {
+                (true, Some(rewritten)) => header_diff(&msg.raw, rewritten),
+                _ => (Vec::new(), Vec::new()),
+            };
+            JsonResult {
+                label: &msg.label,
+                decision: decision_word(&outcome.decision),
+                reason: match &outcome.decision {
+                    PolicyDecision::Reject { reason } => Some(reason.as_str()),
+                    _ => None,
+                },
+                archive: outcome.archive,
+                no_dkim: outcome.no_own_dkim,
+                munge_from: outcome.munge_from,
+                actions: show_trace.then(|| trace.actions.iter().map(action_line).collect()),
+                added_headers,
+                removed_headers,
+            }
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
+}
+
+/// A one-line, human-readable rendering of a single traced Sieve action.
+fn action_line(action: &SieveAction) -> String {
+    match action {
+        SieveAction::Keep { flags } if flags.is_empty() => "keep".to_string(),
+        SieveAction::Keep { flags } => format!("keep [flags: {}]", flags.join(", ")),
+        SieveAction::Discard => "discard".to_string(),
+        SieveAction::Reject { extended, reason } => {
+            let verb = if *extended { "ereject" } else { "reject" };
+            format!("{verb} {reason:?}")
+        }
+        SieveAction::FileInto {
+            folder,
+            flags,
+            create,
+        } => {
+            let mut s = format!("fileinto {folder:?}");
+            if *create {
+                s.push_str(" :create");
+            }
+            if !flags.is_empty() {
+                s.push_str(&format!(" [flags: {}]", flags.join(", ")));
+            }
+            s
+        }
+        SieveAction::Redirect { recipient } => format!("redirect {recipient}"),
+        SieveAction::Notify { method, message } if message.is_empty() => format!("notify {method}"),
+        SieveAction::Notify { method, message } => format!("notify {method} — {message}"),
+        SieveAction::SetEnvelope { field, value } => format!("setenvelope {field} = {value:?}"),
+        SieveAction::EditedMessage => "edited message headers".to_string(),
+    }
+}
+
+/// Header lines added / removed between the original message and the script-rewritten one, as a
+/// multiset difference of their (unfolded) header blocks. Used to show exactly what
+/// `addheader`/`deleteheader` did.
+fn header_diff(original: &[u8], rewritten: &[u8]) -> (Vec<String>, Vec<String>) {
+    let orig = header_lines(original);
+    let new = header_lines(rewritten);
+
+    // added = new − orig, removed = orig − new, each as a multiset so a duplicated header is
+    // reported the right number of times.
+    let mut remaining = new.clone();
+    let mut removed = Vec::new();
+    for line in &orig {
+        if let Some(pos) = remaining.iter().position(|l| l == line) {
+            remaining.remove(pos);
+        } else {
+            removed.push(line.clone());
+        }
+    }
+    let mut remaining = orig.clone();
+    let mut added = Vec::new();
+    for line in &new {
+        if let Some(pos) = remaining.iter().position(|l| l == line) {
+            remaining.remove(pos);
+        } else {
+            added.push(line.clone());
+        }
+    }
+    (added, removed)
+}
+
+/// The unfolded header lines of a raw RFC 5322 message: the header block (everything before the
+/// first blank line), with folded continuation lines joined onto their parent so each entry is one
+/// logical header.
+fn header_lines(raw: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(raw);
+    let end = text
+        .find("\r\n\r\n")
+        .or_else(|| text.find("\n\n"))
+        .unwrap_or(text.len());
+    let mut lines: Vec<String> = Vec::new();
+    for line in text[..end].split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        if (line.starts_with(' ') || line.starts_with('\t')) && !lines.is_empty() {
+            let last = lines.last_mut().unwrap();
+            last.push(' ');
+            last.push_str(line.trim_start());
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_diff_reports_added_and_removed_only() {
+        let orig = b"From: a@example.com\r\nX-Spam-Flag: NO\r\nSubject: hi\r\n\r\nbody\r\n";
+        // A header prepended, one removed, the rest (and the body) unchanged.
+        let new = b"X-Carriers: seen\r\nFrom: a@example.com\r\nSubject: hi\r\n\r\nbody\r\n";
+        let (added, removed) = header_diff(orig, new);
+        assert_eq!(added, vec!["X-Carriers: seen".to_string()]);
+        assert_eq!(removed, vec!["X-Spam-Flag: NO".to_string()]);
+    }
+
+    #[test]
+    fn header_lines_unfolds_continuations() {
+        let raw = b"Subject: a very\r\n long subject\r\nTo: b@example.com\r\n\r\nbody\r\n";
+        assert_eq!(
+            header_lines(raw),
+            vec![
+                "Subject: a very long subject".to_string(),
+                "To: b@example.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn action_line_renders_each_action() {
+        assert_eq!(action_line(&SieveAction::Discard), "discard");
+        assert_eq!(
+            action_line(&SieveAction::Reject {
+                extended: true,
+                reason: "no".to_string()
+            }),
+            "ereject \"no\""
+        );
+        assert_eq!(
+            action_line(&SieveAction::FileInto {
+                folder: "archive".to_string(),
+                flags: vec![],
+                create: true,
+            }),
+            "fileinto \"archive\" :create"
+        );
+        assert_eq!(
+            action_line(&SieveAction::Redirect {
+                recipient: "x@y.com".to_string()
+            }),
+            "redirect x@y.com"
+        );
+    }
 }
