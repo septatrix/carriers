@@ -250,6 +250,7 @@ pub struct PolicyEngine {
     dmarc_before_gate: Arc<Sieve>,
     dmarc_after_gate: Arc<Sieve>,
     munge_from_script: Arc<Sieve>,
+    subject_prefix_script: Arc<Sieve>,
     policies: HashMap<String, Arc<Sieve>>,
     global_before: Vec<Arc<Sieve>>,
     global_after: Vec<Arc<Sieve>>,
@@ -287,6 +288,10 @@ impl PolicyEngine {
             "munge-from",
             include_str!("builtin_policies/munge-from.sieve"),
         )?;
+        let subject_prefix_script = compile_builtin(
+            "subject-prefix",
+            include_str!("builtin_policies/subject-prefix.sieve"),
+        )?;
 
         let mut policies = HashMap::new();
         for (name, script) in BUILTIN_SCRIPTS {
@@ -300,6 +305,7 @@ impl PolicyEngine {
             dmarc_before_gate,
             dmarc_after_gate,
             munge_from_script,
+            subject_prefix_script,
             policies,
             global_before: Vec::new(),
             global_after: Vec::new(),
@@ -593,6 +599,36 @@ impl PolicyEngine {
             .run(
                 "munge-from",
                 &self.munge_from_script,
+                raw,
+                "",
+                &env,
+                &NO_LISTS,
+                &NoDuplicates,
+            )
+            .await?;
+        Ok(run.message.unwrap_or_else(|| raw.to_vec()))
+    }
+
+    /// Apply the built-in `subject-prefix.sieve` script to `raw`, replacing the `Subject` header
+    /// with the value supplied in `subject_env` (see [`crate::transform::subject_prefix_env`]).
+    /// Returns the rewritten message bytes (or `raw` unchanged if the script made no edits).
+    ///
+    /// This is DKIM-breaking and opt-in — the caller runs it only for a list that configures a
+    /// `subject_prefix`, and only when [`crate::transform::subject_prefix_env`] returned a value.
+    pub async fn apply_subject_prefix(
+        &self,
+        list_name: &str,
+        list_id: &str,
+        subject_env: &[(&str, &str)],
+        raw: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut env = vec![(ENV_LIST, list_name), (ENV_LIST_ID, list_id)];
+        env.extend_from_slice(subject_env);
+        let run = self
+            .engine
+            .run(
+                "subject-prefix",
+                &self.subject_prefix_script,
                 raw,
                 "",
                 &env,

@@ -187,6 +187,48 @@ domain = "lists.example.org"
     List::load("dev", &path).unwrap()
 }
 
+/// Build a list that also configures an opt-in `subject_prefix` (the DKIM-breaking `Subject`
+/// prefix). A throwaway `[dkim2]` key is generated internally, like [`build_list`].
+fn build_list_with_subject_prefix(
+    dir: &std::path::Path,
+    dkim_file: &std::path::Path,
+    arc_file: &std::path::Path,
+    subject_prefix: &str,
+) -> List {
+    let (dkim2_file, _) = make_key(dir, "dkim2-prefix-throwaway.der");
+    let toml = format!(
+        r#"
+posting_address = "dev@lists.example.org"
+display_name = "Dev List"
+subject_prefix = "{subject_prefix}"
+
+[dkim]
+selector = "dkimtest"
+key_file = "{dkim}"
+algorithm = "ed25519"
+domain = "lists.example.org"
+
+[arc]
+selector = "arctest"
+key_file = "{arc}"
+algorithm = "ed25519"
+domain = "lists.example.org"
+
+[dkim2]
+selector = "dkim2test"
+key_file = "{dkim2}"
+algorithm = "ed25519"
+domain = "lists.example.org"
+"#,
+        dkim = dkim_file.display(),
+        arc = arc_file.display(),
+        dkim2 = dkim2_file.display(),
+    );
+    let path = dir.join("dev-prefix.toml");
+    std::fs::write(&path, toml).unwrap();
+    List::load("dev", &path).unwrap()
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
@@ -215,6 +257,93 @@ async fn augment_preserves_body_and_adds_list_headers() {
         &augmented,
         b"List-Unsubscribe-Post: List-Unsubscribe=One-Click"
     ));
+}
+
+#[test]
+fn subject_prefix_env_computes_the_prefixed_subject() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dkim_file, _) = make_key(dir.path(), "dkim.der");
+    let (arc_file, _) = make_key(dir.path(), "arc.der");
+
+    // No prefix configured -> nothing to do.
+    let plain = build_list(dir.path(), &dkim_file, &arc_file);
+    assert!(transform::subject_prefix_env(&plain, FIXTURE).is_none());
+
+    // A configured prefix is prepended to the current Subject.
+    let list = build_list_with_subject_prefix(dir.path(), &dkim_file, &arc_file, "[dev]");
+    let env = transform::subject_prefix_env(&list, FIXTURE).unwrap();
+    assert_eq!(
+        env,
+        vec![(transform::SUBJECT, "[dev] Hello list".to_string())]
+    );
+
+    // A Subject that already carries the prefix (e.g. a reply) is left alone, never stacked.
+    let reply = b"From: Alice <alice@example.com>\r\nSubject: Re: [dev] Hello list\r\n\r\nx\r\n";
+    assert!(transform::subject_prefix_env(&list, reply).is_none());
+
+    // With no Subject header at all, the prefix becomes the whole Subject.
+    let no_subject = b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\n\r\nx\r\n";
+    let env = transform::subject_prefix_env(&list, no_subject).unwrap();
+    assert_eq!(env, vec![(transform::SUBJECT, "[dev]".to_string())]);
+}
+
+#[tokio::test]
+async fn subject_prefix_breaks_author_dkim_while_the_list_dkim_stays_valid() {
+    // The documented trade-off of the opt-in Subject prefix: it rewrites the signed `Subject`
+    // header, so the author's original DKIM signature no longer verifies — but the list's own
+    // signature, computed *after* the rewrite, still does. (This is why enabling it is meant to
+    // be paired with From/Reply-To munging so DMARC can pass via the list's aligned identity.)
+    let dir = tempfile::tempdir().unwrap();
+    let (author_file, author_txt) = make_key(dir.path(), "author.der");
+    let (dkim_file, dkim_txt) = make_key(dir.path(), "dkim.der");
+    let (arc_file, _arc_txt) = make_key(dir.path(), "arc.der");
+    let list = build_list_with_subject_prefix(dir.path(), &dkim_file, &arc_file, "[dev]");
+
+    let authored = authored_message(&author_file);
+
+    // Apply the Subject prefix via the same built-in script path `pipeline::finalize` uses, then
+    // the List-* headers, then the list's own signature — mirroring the real pipeline order.
+    let engine = PolicyEngine::new().unwrap();
+    let subject_env = transform::subject_prefix_env(&list, &authored).unwrap();
+    let subject_env: Vec<(&str, &str)> =
+        subject_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let prefixed = engine
+        .apply_subject_prefix("dev", &list.list_id(), &subject_env, &authored)
+        .await
+        .unwrap();
+    assert!(contains(&prefixed, b"Subject: [dev] Hello list"));
+
+    let augmented = augment(&list, &prefixed).await;
+    let signature = list.signer().sign(&augmented).unwrap();
+    let mut signed = signature.to_header().into_bytes();
+    signed.extend_from_slice(&augmented);
+
+    let message = AuthenticatedMessage::parse(&signed).unwrap();
+    let cache = cache(&[
+        ("auth", "example.com", &author_txt),
+        ("dkimtest", "lists.example.org", &dkim_txt),
+    ]);
+    let authenticator = MessageAuthenticator::new_cloudflare().unwrap();
+    let results = authenticator
+        .verify_dkim(Parameters::new(&message).with_txt_cache(&cache))
+        .await;
+
+    let passes = results
+        .iter()
+        .filter(|o| matches!(o.result(), DkimResult::Pass))
+        .count();
+    let fails = results
+        .iter()
+        .filter(|o| matches!(o.result(), DkimResult::Fail(_)))
+        .count();
+    assert_eq!(
+        passes, 1,
+        "only the list's own DKIM signature must still verify: {results:?}"
+    );
+    assert_eq!(
+        fails, 1,
+        "the author's original DKIM must be broken by the Subject rewrite: {results:?}"
+    );
 }
 
 #[tokio::test]

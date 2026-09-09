@@ -825,3 +825,25 @@ async fn apply_munge_from_rewrites_from_and_reply_to() {
     assert!(out.contains("To: dev@lists.example.org"));
     assert!(out.contains("body"));
 }
+
+#[tokio::test]
+async fn apply_subject_prefix_replaces_the_subject_header() {
+    let engine = PolicyEngine::new().unwrap();
+    let raw =
+        b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\nSubject: Hello list\r\n\r\nbody\r\n";
+
+    let subject_env = [("vnd.carriers.subject", "[dev] Hello list")];
+    let out = engine
+        .apply_subject_prefix("dev", LIST_ID, &subject_env, raw)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(out.contains("Subject: [dev] Hello list"));
+    // The old, un-prefixed Subject is gone (not left alongside the new one).
+    assert!(!out.contains("Subject: Hello list"));
+    // The body and other headers survive untouched.
+    assert!(out.contains("From: Alice <alice@example.com>"));
+    assert!(out.contains("To: dev@lists.example.org"));
+    assert!(out.contains("body"));
+}

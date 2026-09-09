@@ -9,6 +9,11 @@
 //! [`munge_from_env`] backs the separate, DKIM-*breaking* `munge-from.sieve` mechanism (mailman3's
 //! `munge_from` DMARC mitigation): rewriting `From`/`Reply-To` to the list's own identity. This is
 //! deliberately never applied by default — see `builtin_policies/munge-from.sieve`.
+//!
+//! [`subject_prefix_env`] likewise backs the DKIM-*breaking* `subject-prefix.sieve`: an opt-in,
+//! per-list `Subject` prefix (e.g. `[dev]`). Rewriting `Subject` invalidates the author's DKIM
+//! signature, so it is off unless a list configures `subject_prefix` — see that field's docs on
+//! [`crate::list::ListConfig`] and `builtin_policies/subject-prefix.sieve`.
 
 use mail_parser::MessageParser;
 
@@ -110,4 +115,37 @@ pub fn munge_from_env(list: &List, raw: &[u8]) -> Vec<(&'static str, String)> {
             original_address.unwrap_or_else(|| posting_address.clone()),
         ),
     ]
+}
+
+/// Environment variable carrying the rewritten `Subject` value to `subject-prefix.sieve`.
+pub const SUBJECT: &str = "vnd.carriers.subject";
+
+/// Compute the `(env-var, value)` pair for [`crate::policy::PolicyEngine::apply_subject_prefix`]:
+/// the list's configured `subject_prefix` followed by the message's current `Subject`.
+///
+/// Returns `None` — meaning "leave the message untouched" — when the list has no (non-empty)
+/// prefix configured, or when the current `Subject` already contains the prefix (a reply that
+/// already carries it must not have it stacked a second time). A message with no `Subject` header
+/// at all takes the prefix as its whole `Subject`.
+pub fn subject_prefix_env(list: &List, raw: &[u8]) -> Option<Vec<(&'static str, String)>> {
+    let prefix = list
+        .cfg
+        .subject_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())?;
+
+    let subject = MessageParser::default()
+        .parse(raw)
+        .and_then(|m| m.subject().map(str::to_string));
+
+    let value = match subject {
+        // Already prefixed (e.g. a reply): don't stack it again.
+        Some(subject) if subject.contains(prefix) => return None,
+        Some(subject) => format!("{prefix} {subject}"),
+        // No Subject at all: the prefix becomes the Subject.
+        None => prefix.to_string(),
+    };
+
+    Some(vec![(SUBJECT, value)])
 }
