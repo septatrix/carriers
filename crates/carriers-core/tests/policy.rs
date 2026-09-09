@@ -826,15 +826,18 @@ async fn apply_munge_from_rewrites_from_and_reply_to() {
     assert!(out.contains("body"));
 }
 
+/// The prefix is passed as the only supplied value; the built-in `subject-prefix.sieve` script
+/// itself composes it with the message's Subject (and decides the reply/no-Subject cases below).
+const SUBJECT_PREFIX_ENV: [(&str, &str); 1] = [("vnd.carriers.subject_prefix", "[dev]")];
+
 #[tokio::test]
-async fn apply_subject_prefix_replaces_the_subject_header() {
+async fn apply_subject_prefix_prepends_the_prefix_to_the_subject() {
     let engine = PolicyEngine::new().unwrap();
     let raw =
         b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\nSubject: Hello list\r\n\r\nbody\r\n";
 
-    let subject_env = [("vnd.carriers.subject", "[dev] Hello list")];
     let out = engine
-        .apply_subject_prefix("dev", LIST_ID, &subject_env, raw)
+        .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, raw)
         .await
         .unwrap();
     let out = String::from_utf8(out).unwrap();
@@ -845,5 +848,35 @@ async fn apply_subject_prefix_replaces_the_subject_header() {
     // The body and other headers survive untouched.
     assert!(out.contains("From: Alice <alice@example.com>"));
     assert!(out.contains("To: dev@lists.example.org"));
+    assert!(out.contains("body"));
+}
+
+#[tokio::test]
+async fn apply_subject_prefix_does_not_stack_on_an_already_prefixed_reply() {
+    let engine = PolicyEngine::new().unwrap();
+    // A reply whose Subject already carries the prefix must be left byte-for-byte unchanged.
+    let raw = b"From: Alice <alice@example.com>\r\nSubject: Re: [dev] Hello list\r\n\r\nbody\r\n";
+
+    let out = engine
+        .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, raw)
+        .await
+        .unwrap();
+
+    assert_eq!(out, raw, "the prefix must not be stacked a second time");
+}
+
+#[tokio::test]
+async fn apply_subject_prefix_uses_the_prefix_as_the_subject_when_there_is_none() {
+    let engine = PolicyEngine::new().unwrap();
+    // No Subject header at all: the prefix becomes the whole Subject.
+    let raw = b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\n\r\nbody\r\n";
+
+    let out = engine
+        .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, raw)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(out.contains("Subject: [dev]"));
     assert!(out.contains("body"));
 }

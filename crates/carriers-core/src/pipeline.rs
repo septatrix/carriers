@@ -333,11 +333,12 @@ pub async fn finalize(
                 raw
             };
 
-            // Opt-in `Subject` prefix (`list.cfg.subject_prefix`) — DKIM-breaking, so applied only
-            // for a list that configured one, and only when the prefix isn't already present (both
-            // decided by `transform::subject_prefix_env`). See that list config field's docs.
+            // Opt-in `Subject` prefix (`list.cfg.subject_prefix`) — DKIM-breaking, so run only for
+            // a list that configured one (`subject_prefix_env` returns `None` otherwise). The
+            // script itself composes `<prefix> <Subject>` and skips a reply that already carries
+            // the prefix. See that list config field's docs.
             let prefixed;
-            let raw = match transform::subject_prefix_env(list, raw) {
+            let raw = match transform::subject_prefix_env(list) {
                 Some(subject_env) => {
                     let subject_env: Vec<(&str, &str)> =
                         subject_env.iter().map(|(k, v)| (*k, v.as_str())).collect();

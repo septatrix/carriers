@@ -260,31 +260,20 @@ async fn augment_preserves_body_and_adds_list_headers() {
 }
 
 #[test]
-fn subject_prefix_env_computes_the_prefixed_subject() {
+fn subject_prefix_env_supplies_the_configured_prefix() {
     let dir = tempfile::tempdir().unwrap();
     let (dkim_file, _) = make_key(dir.path(), "dkim.der");
     let (arc_file, _) = make_key(dir.path(), "arc.der");
 
-    // No prefix configured -> nothing to do.
+    // No prefix configured -> the script must not run at all.
     let plain = build_list(dir.path(), &dkim_file, &arc_file);
-    assert!(transform::subject_prefix_env(&plain, FIXTURE).is_none());
+    assert!(transform::subject_prefix_env(&plain).is_none());
 
-    // A configured prefix is prepended to the current Subject.
+    // A configured prefix is passed through verbatim; the script (not this helper) composes it
+    // with the message's Subject — see the `apply_subject_prefix_*` tests in tests/policy.rs.
     let list = build_list_with_subject_prefix(dir.path(), &dkim_file, &arc_file, "[dev]");
-    let env = transform::subject_prefix_env(&list, FIXTURE).unwrap();
-    assert_eq!(
-        env,
-        vec![(transform::SUBJECT, "[dev] Hello list".to_string())]
-    );
-
-    // A Subject that already carries the prefix (e.g. a reply) is left alone, never stacked.
-    let reply = b"From: Alice <alice@example.com>\r\nSubject: Re: [dev] Hello list\r\n\r\nx\r\n";
-    assert!(transform::subject_prefix_env(&list, reply).is_none());
-
-    // With no Subject header at all, the prefix becomes the whole Subject.
-    let no_subject = b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\n\r\nx\r\n";
-    let env = transform::subject_prefix_env(&list, no_subject).unwrap();
-    assert_eq!(env, vec![(transform::SUBJECT, "[dev]".to_string())]);
+    let env = transform::subject_prefix_env(&list).unwrap();
+    assert_eq!(env, vec![(transform::SUBJECT_PREFIX, "[dev]".to_string())]);
 }
 
 #[tokio::test]
@@ -304,7 +293,7 @@ async fn subject_prefix_breaks_author_dkim_while_the_list_dkim_stays_valid() {
     // Apply the Subject prefix via the same built-in script path `pipeline::finalize` uses, then
     // the List-* headers, then the list's own signature — mirroring the real pipeline order.
     let engine = PolicyEngine::new().unwrap();
-    let subject_env = transform::subject_prefix_env(&list, &authored).unwrap();
+    let subject_env = transform::subject_prefix_env(&list).unwrap();
     let subject_env: Vec<(&str, &str)> =
         subject_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let prefixed = engine

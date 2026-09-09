@@ -296,11 +296,13 @@ via the author's identity. The list's *own* signature (added after the rewrite) 
 the recommended way to run this is alongside From/Reply-To munging (a policy `fileinto
 "munge-from"`), which moves the aligned identity to the list domain so DMARC passes there instead.
 
-Mechanically it works exactly like the `List-*` and munge-from transforms: the rewritten value
-(`<prefix> <Subject>`, or just the prefix when the message had no `Subject`) is computed in Rust
-and handed to the built-in `subject-prefix.sieve`, which `deleteheader`s and re-`addheader`s
-`Subject`. A `Subject` that already carries the prefix (e.g. a reply) is left alone, so the prefix
-is never stacked. See the `subject_prefix` field in
+Unlike the `List-*` and munge-from transforms — where carriers computes the values in Rust because
+they come from config or from parsing an address — the whole transform here is expressible in
+Sieve, so it lives in the built-in `subject-prefix.sieve`: Rust supplies only the prefix, and the
+script captures the current `Subject` with a `:matches "*"` wildcard and re-`addheader`s it behind
+the prefix (`deleteheader` + `addheader`), taking the prefix as the whole `Subject` when the
+message had none. A `Subject` that already carries the prefix (e.g. a reply) is left alone, so the
+prefix is never stacked. See the `subject_prefix` field in
 [`examples/lists/dev.toml`](examples/lists/dev.toml).
 
 ### DKIM2 support

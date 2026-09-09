@@ -117,17 +117,18 @@ pub fn munge_from_env(list: &List, raw: &[u8]) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Environment variable carrying the rewritten `Subject` value to `subject-prefix.sieve`.
-pub const SUBJECT: &str = "vnd.carriers.subject";
+/// Environment variable carrying the list's `Subject` prefix to `subject-prefix.sieve`.
+pub const SUBJECT_PREFIX: &str = "vnd.carriers.subject_prefix";
 
 /// Compute the `(env-var, value)` pair for [`crate::policy::PolicyEngine::apply_subject_prefix`]:
-/// the list's configured `subject_prefix` followed by the message's current `Subject`.
+/// just the list's configured `subject_prefix`. Unlike the other transforms, the composition
+/// itself (`<prefix> <Subject>`, the no-`Subject` fallback, and the "don't stack the prefix on a
+/// reply that already carries it" rule) is expressible in Sieve and lives in the script, so this
+/// only needs to supply the prefix constant.
 ///
-/// Returns `None` — meaning "leave the message untouched" — when the list has no (non-empty)
-/// prefix configured, or when the current `Subject` already contains the prefix (a reply that
-/// already carries it must not have it stacked a second time). A message with no `Subject` header
-/// at all takes the prefix as its whole `Subject`.
-pub fn subject_prefix_env(list: &List, raw: &[u8]) -> Option<Vec<(&'static str, String)>> {
+/// Returns `None` — meaning the caller should not run the script at all — when the list has no
+/// (non-empty) prefix configured.
+pub fn subject_prefix_env(list: &List) -> Option<Vec<(&'static str, String)>> {
     let prefix = list
         .cfg
         .subject_prefix
@@ -135,17 +136,5 @@ pub fn subject_prefix_env(list: &List, raw: &[u8]) -> Option<Vec<(&'static str, 
         .map(str::trim)
         .filter(|p| !p.is_empty())?;
 
-    let subject = MessageParser::default()
-        .parse(raw)
-        .and_then(|m| m.subject().map(str::to_string));
-
-    let value = match subject {
-        // Already prefixed (e.g. a reply): don't stack it again.
-        Some(subject) if subject.contains(prefix) => return None,
-        Some(subject) => format!("{prefix} {subject}"),
-        // No Subject at all: the prefix becomes the Subject.
-        None => prefix.to_string(),
-    };
-
-    Some(vec![(SUBJECT, value)])
+    Some(vec![(SUBJECT_PREFIX, prefix.to_string())])
 }

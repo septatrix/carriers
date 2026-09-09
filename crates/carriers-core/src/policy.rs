@@ -609,12 +609,13 @@ impl PolicyEngine {
         Ok(run.message.unwrap_or_else(|| raw.to_vec()))
     }
 
-    /// Apply the built-in `subject-prefix.sieve` script to `raw`, replacing the `Subject` header
-    /// with the value supplied in `subject_env` (see [`crate::transform::subject_prefix_env`]).
-    /// Returns the rewritten message bytes (or `raw` unchanged if the script made no edits).
+    /// Apply the built-in `subject-prefix.sieve` script to `raw`, prepending the list's prefix
+    /// (supplied in `subject_env` — see [`crate::transform::subject_prefix_env`]) to the `Subject`.
+    /// The script does the composition itself and leaves a reply that already carries the prefix
+    /// untouched, so it returns `raw` unchanged in that case (and whenever it makes no edits).
     ///
     /// This is DKIM-breaking and opt-in — the caller runs it only for a list that configures a
-    /// `subject_prefix`, and only when [`crate::transform::subject_prefix_env`] returned a value.
+    /// `subject_prefix` (i.e. [`crate::transform::subject_prefix_env`] returned a value).
     pub async fn apply_subject_prefix(
         &self,
         list_name: &str,
