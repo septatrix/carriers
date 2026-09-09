@@ -74,6 +74,23 @@ pub struct ListConfig {
     #[serde(default)]
     pub unsubscribe_oneclick: Option<String>,
 
+    /// Optional `Subject` prefix tag (e.g. `dev`) prepended to every distributed post's `Subject`.
+    ///
+    /// This is the bare tag, *without* the square brackets: the built-in `subject-prefix.sieve`
+    /// wraps it, so `subject_prefix = "dev"` yields a distributed `Subject` of `[dev] <original>`.
+    ///
+    /// **Off by default, and DKIM-breaking.** Every other transform carriers performs only
+    /// *prepends headers*, so the author's original DKIM signature stays valid; rewriting the
+    /// `Subject` (a signed header) does not — it invalidates that signature, so a post from a
+    /// domain publishing `p=reject`/`p=quarantine` will then fail DMARC at the recipient via the
+    /// author's identity. Enable this only if you accept that, and typically only alongside
+    /// From/Reply-To munging (a policy `fileinto "munge-from"`) so the message still goes out under
+    /// the list's own aligned identity. An empty or whitespace-only value is treated as unset. A
+    /// `Subject` that already carries the bracketed tag at the front — at the very start, or right
+    /// after reply/forward markers like `Re: `/`Fwd: ` — is left alone, so it is never stacked.
+    #[serde(default)]
+    pub subject_prefix: Option<String>,
+
     /// DKIM signing key for the list domain.
     pub dkim: KeyConfig,
     /// ARC sealing key for the list domain.
