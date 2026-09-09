@@ -11,13 +11,20 @@
 # derived URLs), the whole transform is expressible in Sieve: the only value carriers supplies is
 # the prefix itself, as `${env.vnd.carriers.subject_prefix}`. The script captures the current
 # `Subject` with a `:matches "*"` wildcard and re-`addheader`s it behind the prefix (a message with
-# no `Subject` at all just takes the prefix as its `Subject`). A `Subject` that already contains the
-# prefix — e.g. a reply — is left untouched, so the prefix is never stacked.
+# no `Subject` at all just takes the prefix as its `Subject`). A `Subject` that already carries the
+# prefix at the front is left untouched, so the prefix is never stacked.
 
 require ["editheader", "variables", "environment"];
 
-# Already prefixed (e.g. a reply): leave the message exactly as-is.
-if header :contains "Subject" "${env.vnd.carriers.subject_prefix}" {
+# Already prefixed at the front: leave the message exactly as-is. The prefix counts as "at the
+# front" either at the very start of the `Subject`, or right after a run of reply/forward markers
+# — anything ending in a colon-space, e.g. `Re: `, `Fwd: `, `Re: Fwd: `. It deliberately does *not*
+# match the prefix appearing arbitrarily later in the `Subject` (that is treated as ordinary text
+# and still gets prefixed), so a genuine `[dev]` mid-subject isn't mistaken for the list prefix.
+if anyof(
+    header :matches "Subject" "${env.vnd.carriers.subject_prefix}*",
+    header :matches "Subject" "*: ${env.vnd.carriers.subject_prefix}*"
+) {
     stop;
 }
 

@@ -852,17 +852,43 @@ async fn apply_subject_prefix_prepends_the_prefix_to_the_subject() {
 }
 
 #[tokio::test]
-async fn apply_subject_prefix_does_not_stack_on_an_already_prefixed_reply() {
+async fn apply_subject_prefix_does_not_stack_when_the_prefix_is_already_at_the_front() {
     let engine = PolicyEngine::new().unwrap();
-    // A reply whose Subject already carries the prefix must be left byte-for-byte unchanged.
-    let raw = b"From: Alice <alice@example.com>\r\nSubject: Re: [dev] Hello list\r\n\r\nbody\r\n";
+    // The prefix "at the front" means either the very start, or right after a run of reply/forward
+    // markers (anything ending in a colon-space). None of these may be prefixed a second time.
+    for subject in [
+        "[dev] Hello list",          // already at the very start
+        "Re: [dev] Hello list",      // after a reply marker
+        "Fwd: [dev] Hello list",     // after a forward marker
+        "Re: Fwd: [dev] Hello list", // after a marker chain
+    ] {
+        let raw = format!("From: Alice <alice@example.com>\r\nSubject: {subject}\r\n\r\nbody\r\n")
+            .into_bytes();
+        let out = engine
+            .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, &raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            out, raw,
+            "`{subject}` already carries the prefix at the front and must be left unchanged"
+        );
+    }
+}
+
+#[tokio::test]
+async fn apply_subject_prefix_still_prefixes_when_the_token_only_appears_mid_subject() {
+    let engine = PolicyEngine::new().unwrap();
+    // The prefix string appears later in the Subject as ordinary text, not as the list prefix at
+    // the front — so it must still be prefixed (the tightened check is anchored, not a substring).
+    let raw = b"From: Alice <alice@example.com>\r\nSubject: Hello [dev] world\r\n\r\nbody\r\n";
 
     let out = engine
         .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, raw)
         .await
         .unwrap();
+    let out = String::from_utf8(out).unwrap();
 
-    assert_eq!(out, raw, "the prefix must not be stacked a second time");
+    assert!(out.contains("Subject: [dev] Hello [dev] world"));
 }
 
 #[tokio::test]

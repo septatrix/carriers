@@ -301,8 +301,10 @@ they come from config or from parsing an address — the whole transform here is
 Sieve, so it lives in the built-in `subject-prefix.sieve`: Rust supplies only the prefix, and the
 script captures the current `Subject` with a `:matches "*"` wildcard and re-`addheader`s it behind
 the prefix (`deleteheader` + `addheader`), taking the prefix as the whole `Subject` when the
-message had none. A `Subject` that already carries the prefix (e.g. a reply) is left alone, so the
-prefix is never stacked. See the `subject_prefix` field in
+message had none. A `Subject` that already carries the prefix *at the front* — at the very start,
+or right after a run of reply/forward markers such as `Re: ` or `Fwd: ` — is left alone, so the
+prefix is never stacked; the same string appearing later in the `Subject` is treated as ordinary
+text and still gets prefixed. See the `subject_prefix` field in
 [`examples/lists/dev.toml`](examples/lists/dev.toml).
 
 ### DKIM2 support

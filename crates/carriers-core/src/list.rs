@@ -83,8 +83,9 @@ pub struct ListConfig {
     /// author's identity. Enable this only if you accept that, and typically only alongside
     /// From/Reply-To munging (a policy `fileinto "munge-from"`) so the message still goes out under
     /// the list's own aligned identity. Applied by the built-in `subject-prefix.sieve`; an empty
-    /// or whitespace-only value is treated as unset. A `Subject` that already contains the prefix
-    /// (e.g. a reply) is left alone, so the prefix is never stacked.
+    /// or whitespace-only value is treated as unset. A `Subject` that already carries the prefix
+    /// at the front — at the very start, or right after reply/forward markers like `Re: `/`Fwd: `
+    /// — is left alone, so the prefix is never stacked.
     #[serde(default)]
     pub subject_prefix: Option<String>,
 

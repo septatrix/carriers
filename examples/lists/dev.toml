@@ -20,7 +20,8 @@ unsubscribe_oneclick = "https://lists.example.org/u/dev?token=..."
 # will then fail DMARC at the recipient via the author's identity. Enable it only if you accept
 # that — and typically only alongside From/Reply-To munging (a policy `fileinto "munge-from"`) so
 # the message still goes out under the list's own aligned identity. A `Subject` that already
-# carries the prefix (e.g. a reply) is not prefixed a second time.
+# carries the prefix at the front (the start, or after a `Re: `/`Fwd: ` marker) is not prefixed a
+# second time.
 # subject_prefix = "[dev]"
 
 # The moderation policy: a built-in name, or the name of a custom `<name>.sieve` file in
