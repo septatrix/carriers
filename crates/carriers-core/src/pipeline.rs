@@ -313,9 +313,11 @@ pub async fn finalize(
         PolicyDecision::Approve => {
             let recipients = members.recipients(&list.name).await?;
 
-            // The pristine inbound bytes, before any of carriers' own transforms — the diff
-            // baseline for the list's own DKIM2 chain link (see `sign::sign_and_seal`), which
-            // records exactly what carriers changed (munge-from, if any, plus List headers).
+            // The pristine inbound bytes, before any of carriers' own transforms. Two later steps
+            // need what we actually received rather than the transformed outbound copy: the ARC
+            // seal records this message's ingress authentication (see `sign::sign_and_seal`), and
+            // it is the diff baseline for the list's own DKIM2 chain link (which records exactly
+            // what carriers changed — a Subject prefix / munge-from, if any, plus List headers).
             let original_raw = raw;
 
             // An "after" tier may request From/Reply-To munging (`fileinto "munge-from"`) — an
@@ -360,6 +362,7 @@ pub async fn finalize(
                 authenticator,
                 list,
                 hostname,
+                original_raw,
                 &augmented,
                 ingress,
                 outcome.no_own_dkim,
