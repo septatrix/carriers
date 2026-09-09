@@ -269,11 +269,11 @@ fn subject_prefix_env_supplies_the_configured_prefix() {
     let plain = build_list(dir.path(), &dkim_file, &arc_file);
     assert!(transform::subject_prefix_env(&plain).is_none());
 
-    // A configured prefix is passed through verbatim; the script (not this helper) composes it
-    // with the message's Subject — see the `apply_subject_prefix_*` tests in tests/policy.rs.
-    let list = build_list_with_subject_prefix(dir.path(), &dkim_file, &arc_file, "[dev]");
+    // The bare tag is passed through verbatim; the script (not this helper) wraps it in `[...]`
+    // and composes it with the Subject — see the `apply_subject_prefix_*` tests in tests/policy.rs.
+    let list = build_list_with_subject_prefix(dir.path(), &dkim_file, &arc_file, "dev");
     let env = transform::subject_prefix_env(&list).unwrap();
-    assert_eq!(env, vec![(transform::SUBJECT_PREFIX, "[dev]".to_string())]);
+    assert_eq!(env, vec![(transform::SUBJECT_PREFIX, "dev".to_string())]);
 }
 
 #[tokio::test]
@@ -286,7 +286,7 @@ async fn subject_prefix_breaks_author_dkim_while_the_list_dkim_stays_valid() {
     let (author_file, author_txt) = make_key(dir.path(), "author.der");
     let (dkim_file, dkim_txt) = make_key(dir.path(), "dkim.der");
     let (arc_file, _arc_txt) = make_key(dir.path(), "arc.der");
-    let list = build_list_with_subject_prefix(dir.path(), &dkim_file, &arc_file, "[dev]");
+    let list = build_list_with_subject_prefix(dir.path(), &dkim_file, &arc_file, "dev");
 
     let authored = authored_message(&author_file);
 

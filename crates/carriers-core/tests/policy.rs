@@ -826,9 +826,9 @@ async fn apply_munge_from_rewrites_from_and_reply_to() {
     assert!(out.contains("body"));
 }
 
-/// The prefix is passed as the only supplied value; the built-in `subject-prefix.sieve` script
-/// itself composes it with the message's Subject (and decides the reply/no-Subject cases below).
-const SUBJECT_PREFIX_ENV: [(&str, &str); 1] = [("vnd.carriers.subject_prefix", "[dev]")];
+/// The bare tag is the only supplied value; the built-in `subject-prefix.sieve` script wraps it in
+/// `[...]`, composes it with the message's Subject, and decides the reply/no-Subject cases below.
+const SUBJECT_PREFIX_ENV: [(&str, &str); 1] = [("vnd.carriers.subject_prefix", "dev")];
 
 #[tokio::test]
 async fn apply_subject_prefix_prepends_the_prefix_to_the_subject() {

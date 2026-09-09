@@ -117,14 +117,15 @@ pub fn munge_from_env(list: &List, raw: &[u8]) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Environment variable carrying the list's `Subject` prefix to `subject-prefix.sieve`.
+/// Environment variable carrying the list's bare `Subject` prefix tag to `subject-prefix.sieve`.
 pub const SUBJECT_PREFIX: &str = "vnd.carriers.subject_prefix";
 
 /// Compute the `(env-var, value)` pair for [`crate::policy::PolicyEngine::apply_subject_prefix`]:
-/// just the list's configured `subject_prefix`. Unlike the other transforms, the composition
-/// itself (`<prefix> <Subject>`, the no-`Subject` fallback, and the "don't stack the prefix on a
-/// reply that already carries it" rule) is expressible in Sieve and lives in the script, so this
-/// only needs to supply the prefix constant.
+/// just the list's configured `subject_prefix` (the bare tag, unbracketed). Unlike the other
+/// transforms, the composition itself (wrapping the tag in `[...]`, prepending it to the
+/// `Subject`, the no-`Subject` fallback, and the "don't stack the tag on a reply that already
+/// carries it" rule) is expressible in Sieve and lives in the script, so this only supplies the
+/// tag.
 ///
 /// Returns `None` — meaning the caller should not run the script at all — when the list has no
 /// (non-empty) prefix configured.

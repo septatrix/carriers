@@ -287,24 +287,26 @@ transform that breaks the author's DKIM wants the list's own aligned identity to
 
 ### Subject prefix (opt-in, DKIM-breaking)
 
-A list may set a `subject_prefix` (e.g. `[dev]`) that is prepended to every distributed post's
-`Subject` — mailman3's `subject_prefix`. It is **off by default and deliberately special**: it is
-the one built-in transform that is *not* DKIM-safe. Every other step only prepends headers, leaving
-the author's original DKIM signature valid; rewriting the signed `Subject` header invalidates it,
-so a post from a domain publishing `p=reject`/`p=quarantine` will then fail DMARC at the recipient
-via the author's identity. The list's *own* signature (added after the rewrite) is still valid, so
-the recommended way to run this is alongside From/Reply-To munging (a policy `fileinto
-"munge-from"`), which moves the aligned identity to the list domain so DMARC passes there instead.
+A list may set a `subject_prefix` — a bare tag such as `dev` — that carriers wraps in square
+brackets and prepends to every distributed post's `Subject`, so `subject_prefix = "dev"` yields
+`[dev] <original>` (mailman3's `subject_prefix`). It is **off by default and deliberately
+special**: it is the one built-in transform that is *not* DKIM-safe. Every other step only prepends
+headers, leaving the author's original DKIM signature valid; rewriting the signed `Subject` header
+invalidates it, so a post from a domain publishing `p=reject`/`p=quarantine` will then fail DMARC
+at the recipient via the author's identity. The list's *own* signature (added after the rewrite) is
+still valid, so the recommended way to run this is alongside From/Reply-To munging (a policy
+`fileinto "munge-from"`), which moves the aligned identity to the list domain so DMARC passes there
+instead.
 
 Unlike the `List-*` and munge-from transforms — where carriers computes the values in Rust because
 they come from config or from parsing an address — the whole transform here is expressible in
-Sieve, so it lives in the built-in `subject-prefix.sieve`: Rust supplies only the prefix, and the
-script captures the current `Subject` with a `:matches "*"` wildcard and re-`addheader`s it behind
-the prefix (`deleteheader` + `addheader`), taking the prefix as the whole `Subject` when the
-message had none. A `Subject` that already carries the prefix *at the front* — at the very start,
-or right after a run of reply/forward markers such as `Re: ` or `Fwd: ` — is left alone, so the
-prefix is never stacked; the same string appearing later in the `Subject` is treated as ordinary
-text and still gets prefixed. See the `subject_prefix` field in
+Sieve, so it lives in the built-in `subject-prefix.sieve`: Rust supplies only the bare tag, and the
+script wraps it in `[...]`, captures the current `Subject` with a `:matches "*"` wildcard, and
+re-`addheader`s it behind the bracketed tag (`deleteheader` + `addheader`), taking the tag alone as
+the whole `Subject` when the message had none. A `Subject` that already carries the bracketed tag
+*at the front* — at the very start, or right after a run of reply/forward markers such as `Re: ` or
+`Fwd: ` — is left alone, so the tag is never stacked; the same string appearing later in the
+`Subject` is treated as ordinary text and still gets prefixed. See the `subject_prefix` field in
 [`examples/lists/dev.toml`](examples/lists/dev.toml).
 
 ### DKIM2 support

@@ -15,14 +15,15 @@ subscribe_url = "https://lists.example.org/subscribe/dev"
 unsubscribe_oneclick = "https://lists.example.org/u/dev?token=..."
 
 # Optional, DKIM-BREAKING `Subject` prefix prepended to every distributed post (mailman3's
-# `subject_prefix`). Off by default. Unlike every other transform carriers performs, rewriting the
-# `Subject` invalidates the author's original DKIM signature, so a post from a `p=reject` domain
-# will then fail DMARC at the recipient via the author's identity. Enable it only if you accept
-# that — and typically only alongside From/Reply-To munging (a policy `fileinto "munge-from"`) so
-# the message still goes out under the list's own aligned identity. A `Subject` that already
-# carries the prefix at the front (the start, or after a `Re: `/`Fwd: ` marker) is not prefixed a
-# second time.
-# subject_prefix = "[dev]"
+# `subject_prefix`). Off by default. This is the bare tag, without brackets — carriers wraps it, so
+# `subject_prefix = "dev"` makes the distributed `Subject` read `[dev] <original>`. Unlike every
+# other transform carriers performs, rewriting the `Subject` invalidates the author's original DKIM
+# signature, so a post from a `p=reject` domain will then fail DMARC at the recipient via the
+# author's identity. Enable it only if you accept that — and typically only alongside From/Reply-To
+# munging (a policy `fileinto "munge-from"`) so the message still goes out under the list's own
+# aligned identity. A `Subject` that already carries the bracketed tag at the front (the start, or
+# after a `Re: `/`Fwd: ` marker) is not prefixed a second time.
+# subject_prefix = "dev"
 
 # The moderation policy: a built-in name, or the name of a custom `<name>.sieve` file in
 # `sieve_scripts/moderation_policies/` (see examples/sieve_scripts/moderation_policies/). Held
