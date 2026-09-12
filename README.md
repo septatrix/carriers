@@ -388,9 +388,9 @@ moderator, decided).
 Every delivered copy carries a per-recipient VERP return path
 (`dev+bounce=user=example.com@lists.example.org`), so a delivery failure produces a DSN
 addressed back to the failing subscriber. carriers recognises those bounce addresses on ingress,
-classifies the DSN (permanent `5.x.x` vs transient `4.x.x`), and adds a weight to the
-subscriber's running bounce score. `carriers member list` shows the current score and disabled
-state.
+classifies the DSN (permanent `5.x.x` vs transient `4.x.x`), reads the `Message-ID` of the post
+that bounced out of the message the DSN returns, and adds a weight to the subscriber's running
+bounce score. `carriers member list` shows the current score and disabled state.
 
 That much is carriers' own accounting and always happens. What *follows* from a bounce is a
 Sieve script, `bounce.sieve`, like every other policy decision here. The message it runs against
@@ -400,6 +400,7 @@ exposed as environment variables:
 | Variable | Value |
 | --- | --- |
 | `vnd.carriers.bounce_address` | the subscriber this DSN is about |
+| `vnd.carriers.bounce_message_id` | `Message-ID` of the post that bounced (no angle brackets), empty if the DSN did not identify it |
 | `vnd.carriers.bounce_kind` | `hard` (permanent, `5.x.x`) or `soft` (transient, `4.x.x`) |
 | `vnd.carriers.bounce_status` | the DSN status it was classified from, e.g. `5.1.1` |
 | `vnd.carriers.bounce_score` | the subscriber's running score, including this bounce |

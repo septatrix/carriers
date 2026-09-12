@@ -6,6 +6,8 @@
 //! registered by RFC 3463 (`class.subject.detail`, e.g. `5.1.1`), to weigh permanent failures
 //! more heavily than transient ones.
 
+use mail_parser::{MessageParser, MessagePart, MimeHeaders, PartType};
+
 /// The severity of a bounce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BounceKind {
@@ -80,9 +82,55 @@ pub fn classify(raw: &[u8]) -> Bounce {
     }
 }
 
+/// The `Message-ID` of the message this DSN is about, if it can be worked out.
+///
+/// A DSN returns the failed message in a part of its own (RFC 3464 §6.3): the whole message as
+/// `message/rfc822`, or just its headers as `text/rfc822-headers`. Either way the original
+/// `Message-ID` is in there. Not every reporter includes that part — and some truncate it — so
+/// this falls back to the DSN's own `In-Reply-To`, which RFC 3464 §3 asks a reporting MTA to set
+/// to the `Message-ID` of the message being reported on.
+///
+/// Returned as it appears in the header, without the surrounding angle brackets, matching what
+/// carriers records elsewhere (see `pipeline::write_archive`).
+pub fn original_message_id(raw: &[u8]) -> Option<String> {
+    let dsn = MessageParser::default().parse(raw)?;
+
+    for part in &dsn.parts {
+        match &part.body {
+            // `message/rfc822`: the returned message, already parsed as a message of its own.
+            PartType::Message(original) => {
+                if let Some(id) = original.message_id() {
+                    return Some(id.to_string());
+                }
+            }
+            // `text/rfc822-headers`: the returned headers as plain text, which have to be parsed
+            // as a (body-less) message to read anything out of them.
+            PartType::Text(text) if is_returned_headers(part) => {
+                if let Some(id) = MessageParser::default()
+                    .parse(text.as_bytes())
+                    .and_then(|headers| headers.message_id().map(str::to_string))
+                {
+                    return Some(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    dsn.in_reply_to().as_text().map(str::to_string)
+}
+
+/// Whether a part is the `text/rfc822-headers` form of a DSN's returned content.
+fn is_returned_headers(part: &MessagePart<'_>) -> bool {
+    part.content_type()
+        .and_then(|content_type| content_type.subtype())
+        .is_some_and(|subtype| subtype.eq_ignore_ascii_case("rfc822-headers"))
+}
+
 /// Environment variables carrying the facts about a bounce to the bounce script — see
 /// [`BounceFacts::env_pairs`] and `builtin_policies/bounce.sieve`.
 pub const ENV_ADDRESS: &str = "vnd.carriers.bounce_address";
+pub const ENV_MESSAGE_ID: &str = "vnd.carriers.bounce_message_id";
 pub const ENV_KIND: &str = "vnd.carriers.bounce_kind";
 pub const ENV_STATUS: &str = "vnd.carriers.bounce_status";
 pub const ENV_SCORE: &str = "vnd.carriers.bounce_score";
@@ -100,6 +148,9 @@ pub const ENV_DISABLED: &str = "vnd.carriers.bounce_disabled";
 pub struct BounceFacts {
     /// The subscriber this DSN is about, decoded from the VERP return path.
     pub address: String,
+    /// The `Message-ID` of the post that bounced, if the DSN identified it (see
+    /// [`original_message_id`]).
+    pub message_id: Option<String>,
     pub kind: BounceKind,
     /// The DSN status this bounce was classified from (see [`Bounce::status`]).
     pub status: Option<String>,
@@ -127,6 +178,7 @@ impl BounceFacts {
     pub fn env_pairs(&self) -> Vec<(&'static str, String)> {
         vec![
             (ENV_ADDRESS, self.address.clone()),
+            (ENV_MESSAGE_ID, self.message_id.clone().unwrap_or_default()),
             (ENV_KIND, self.kind.as_str().to_string()),
             (ENV_STATUS, self.status.clone().unwrap_or_default()),
             (ENV_SCORE, self.score.to_string()),
@@ -178,5 +230,76 @@ mod tests {
         let unknown = classify(b"Subject: out of office\r\n\r\nI am away.");
         assert_eq!(unknown.kind, BounceKind::Unknown);
         assert_eq!(unknown.status, None);
+    }
+
+    /// A DSN whose third part returns the failed message itself, the common shape.
+    const DSN_WITH_RETURNED_MESSAGE: &[u8] = concat!(
+        "From: MAILER-DAEMON@mx.example.com\r\n",
+        "Subject: Undelivered Mail Returned to Sender\r\n",
+        "Content-Type: multipart/report; report-type=delivery-status; boundary=b\r\n",
+        "\r\n--b\r\n",
+        "Content-Type: message/delivery-status\r\n\r\n",
+        "Final-Recipient: rfc822; bob@example.com\r\n",
+        "Action: failed\r\n",
+        "Status: 5.1.1\r\n",
+        "\r\n--b\r\n",
+        "Content-Type: message/rfc822\r\n\r\n",
+        "From: alice@example.com\r\n",
+        "To: dev@lists.example.org\r\n",
+        "Message-ID: <post-42@example.com>\r\n",
+        "Subject: the post that bounced\r\n",
+        "\r\n",
+        "body\r\n",
+        "\r\n--b--\r\n",
+    )
+    .as_bytes();
+
+    /// The other permitted shape: only the failed message's headers come back.
+    const DSN_WITH_RETURNED_HEADERS: &[u8] = concat!(
+        "From: MAILER-DAEMON@mx.example.com\r\n",
+        "Content-Type: multipart/report; report-type=delivery-status; boundary=b\r\n",
+        "\r\n--b\r\n",
+        "Content-Type: message/delivery-status\r\n\r\n",
+        "Status: 5.2.1\r\n",
+        "\r\n--b\r\n",
+        "Content-Type: text/rfc822-headers\r\n\r\n",
+        "From: alice@example.com\r\n",
+        "Message-ID: <post-43@example.com>\r\n",
+        "Subject: the post that bounced\r\n",
+        "\r\n--b--\r\n",
+    )
+    .as_bytes();
+
+    #[test]
+    fn original_message_id_reads_the_returned_message_or_headers() {
+        // Either way, the id comes back without its angle brackets.
+        assert_eq!(
+            original_message_id(DSN_WITH_RETURNED_MESSAGE).as_deref(),
+            Some("post-42@example.com")
+        );
+        assert_eq!(
+            original_message_id(DSN_WITH_RETURNED_HEADERS).as_deref(),
+            Some("post-43@example.com")
+        );
+    }
+
+    #[test]
+    fn original_message_id_falls_back_to_in_reply_to() {
+        // A reporter that returns nothing of the original message, but does point at it the way
+        // RFC 3464 asks.
+        let dsn = concat!(
+            "From: MAILER-DAEMON@mx.example.com\r\n",
+            "In-Reply-To: <post-44@example.com>\r\n",
+            "Content-Type: message/delivery-status\r\n\r\n",
+            "Status: 5.1.1\r\n",
+        )
+        .as_bytes();
+        assert_eq!(
+            original_message_id(dsn).as_deref(),
+            Some("post-44@example.com")
+        );
+
+        // Nothing to go on at all: the script is told nothing rather than something invented.
+        assert_eq!(original_message_id(HARD_DSN), None);
     }
 }

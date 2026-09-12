@@ -344,6 +344,7 @@ async fn handle_bounce(
 
     let facts = BounceFacts {
         address: address.to_string(),
+        message_id: bounce::original_message_id(raw),
         kind: bounce.kind,
         status: bounce.status,
         score: recorded.score,

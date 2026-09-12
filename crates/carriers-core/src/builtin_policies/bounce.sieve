@@ -5,6 +5,8 @@
 # `vnd.carriers.bounce_*` environment variables:
 #
 #   bounce_address         the subscriber the DSN is about
+#   bounce_message_id      Message-ID of the post that bounced, without angle brackets, or empty
+#                          if the DSN did not identify it
 #   bounce_kind            "hard" (permanent, 5.x.x) or "soft" (transient, 4.x.x)
 #   bounce_status          the DSN status it was classified from, e.g. "5.1.1"
 #   bounce_score           the subscriber's running score, including this bounce

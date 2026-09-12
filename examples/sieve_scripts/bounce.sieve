@@ -16,7 +16,7 @@ require ["variables", "environment", "ihave", "vnd.stalwart.expressions"];
 
 # `${...}` interpolation happens in `set`, not inside an expression — so build the body first
 # and hand the expression the variable.
-set "body" "{\"list\": \"${env.vnd.carriers.list}\", \"address\": \"${env.vnd.carriers.bounce_address}\", \"kind\": \"${env.vnd.carriers.bounce_kind}\", \"status\": \"${env.vnd.carriers.bounce_status}\", \"score\": ${env.vnd.carriers.bounce_score}}";
+set "body" "{\"list\": \"${env.vnd.carriers.list}\", \"address\": \"${env.vnd.carriers.bounce_address}\", \"message_id\": \"${env.vnd.carriers.bounce_message_id}\", \"kind\": \"${env.vnd.carriers.bounce_kind}\", \"status\": \"${env.vnd.carriers.bounce_status}\", \"score\": ${env.vnd.carriers.bounce_score}}";
 
 let "status" "http_request('POST', 'https://db.example.org/api/mailinglist/bounce', body)";
 

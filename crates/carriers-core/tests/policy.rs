@@ -883,6 +883,7 @@ impl RecordingFunctions {
 fn facts(score: f64, disabled: bool) -> BounceFacts {
     BounceFacts {
         address: "bob@example.com".to_string(),
+        message_id: Some("post-42@example.com".to_string()),
         kind: BounceKind::Hard,
         status: Some("5.1.1".to_string()),
         score,
@@ -1016,6 +1017,10 @@ async fn the_example_bounce_script_reports_and_escalates_what_it_cannot_report()
     assert!(
         calls[0].contains(r#""address": "bob@example.com""#),
         "{calls:?}"
+    );
+    assert!(
+        calls[0].contains(r#""message_id": "post-42@example.com""#),
+        "the report identifies which post bounced: {calls:?}"
     );
     assert!(!calls.contains(&"disable".to_string()), "{calls:?}");
 
