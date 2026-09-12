@@ -21,7 +21,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 serde.workspace = true
+async-trait.workspace = true
 mail-send = "0.6.1"
 smtp-proto = "0.2.1"
 clap = { version = "4.6.1", features = ["derive"] }
 listenfd = "1.0.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

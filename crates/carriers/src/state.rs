@@ -22,6 +22,9 @@ pub struct AppState {
     pub policy: PolicyEngine,
     /// Lists keyed by their lowercased posting address.
     pub lists: HashMap<String, Arc<List>>,
+    /// Client for the `http_request` Sieve primitive (see [`crate::hooks`]). Built once so calls
+    /// share its connection pool, and carries the timeout that bounds them.
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -49,6 +52,11 @@ impl AppState {
         info!(count = lists.len(), "loaded lists");
         validate_policies(&lists, &policy)?;
 
+        let http = reqwest::Client::builder()
+            .timeout(crate::hooks::HTTP_TIMEOUT)
+            .build()
+            .context("building the HTTP client for Sieve scripts")?;
+
         Ok(AppState {
             config,
             authenticator,
@@ -56,6 +64,7 @@ impl AppState {
             members,
             policy,
             lists,
+            http,
         })
     }
 

@@ -33,6 +33,14 @@ pub struct Member {
     pub bounce_disabled: bool,
 }
 
+/// A member's bounce accounting after a bounce was recorded — see [`Store::record_bounce`].
+pub struct BounceState {
+    /// The running score, including the bounce just recorded.
+    pub score: f64,
+    /// Whether delivery was already disabled before this bounce.
+    pub disabled: bool,
+}
+
 /// A summary row of the moderation queue (without the message body).
 pub struct HeldSummary {
     pub id: i64,
@@ -200,33 +208,49 @@ impl Store {
             .collect())
     }
 
-    /// Record a bounce for a subscriber, adding `weight` to their score and disabling delivery
-    /// once the score reaches `threshold`.
+    /// Record a bounce for a subscriber, adding `weight` to their running score.
     ///
-    /// Returns `None` if the address is not a member of the list, otherwise `Some(disabled)`
-    /// reflecting whether delivery is now disabled.
+    /// This only does the accounting. What *follows* from a bounce — disabling delivery, telling
+    /// an external system, doing nothing — is decided by the bounce script (see
+    /// [`crate::policy::PolicyEngine::evaluate_bounce`]), which acts through
+    /// [`Store::disable_delivery`]. Returns `None` if the address is not a member of the list.
     pub async fn record_bounce(
         &self,
         list: &str,
         address: &str,
         weight: f64,
-        threshold: f64,
-    ) -> Result<Option<bool>> {
-        let disabled: Option<i64> = sqlx::query_scalar(
+    ) -> Result<Option<BounceState>> {
+        let row: Option<(f64, i64)> = sqlx::query_as(
             "UPDATE members SET \
                  bounce_score = bounce_score + ?3, \
-                 last_bounce_at = strftime('%s','now'), \
-                 bounce_disabled = CASE WHEN bounce_score + ?3 >= ?4 THEN 1 ELSE bounce_disabled END \
+                 last_bounce_at = strftime('%s','now') \
              WHERE list = ?1 AND address = ?2 \
-             RETURNING bounce_disabled",
+             RETURNING bounce_score, bounce_disabled",
         )
         .bind(list)
         .bind(address.trim().to_ascii_lowercase())
         .bind(weight)
-        .bind(threshold)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(disabled.map(|d| d != 0))
+        Ok(row.map(|(score, disabled)| BounceState {
+            score,
+            disabled: disabled != 0,
+        }))
+    }
+
+    /// Stop delivering this list's mail to a member, leaving their subscription and score alone.
+    /// The inverse of [`Store::enable_member`], which also clears the score.
+    ///
+    /// Returns `true` if the address is a member of the list (whether or not delivery was already
+    /// disabled — repeating this is a no-op, not a failure).
+    pub async fn disable_delivery(&self, list: &str, address: &str) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE members SET bounce_disabled = 1 WHERE list = ? AND address = ?")
+                .bind(list)
+                .bind(address.trim().to_ascii_lowercase())
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Clear a member's bounce state and re-enable delivery.

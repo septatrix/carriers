@@ -4,12 +4,12 @@ A simple mailing list manager written in Rust, built for compliance with **SPF, 
 and ARC** so that list mail is accepted by large providers (Google, Microsoft, Apple).
 
 carriers is also highly configurable and scriptable: posting/moderation policy, the optional
-global and per-domain before/after tiers, and even the built-in loop detection, duplicate
-suppression, `List-*` header injection, and DMARC enforcement gate are themselves ordinary
-**Sieve** scripts (RFC 5228/5429) — see "Posting policy and moderation", "Global policy", and
-"Built-in loop, duplicate, and header scripts" below. The built-in modes are just the shipped
-defaults, not a ceiling: an administrator can drop in fully custom `.sieve` logic at nearly every
-stage of the pipeline.
+global and per-domain before/after tiers, what follows from a bounce, and even the built-in loop
+detection, duplicate suppression, `List-*` header injection, and DMARC enforcement gate are
+themselves ordinary **Sieve** scripts (RFC 5228/5429) — see "Posting policy and moderation",
+"Global policy", "Built-in loop, duplicate, and header scripts", and "Bounce handling" below. The
+built-in modes are just the shipped defaults, not a ceiling: an administrator can drop in fully
+custom `.sieve` logic at nearly every stage of the pipeline.
 
 ## Why DMARC breaks mailing lists — and how carriers stays compliant
 
@@ -49,7 +49,7 @@ crates: `mail-auth` (DKIM/SPF/DMARC/ARC), `mail-parser`, `mail-builder`, `mail-s
 | ARC sealing | built in, automatic | built in (3.3.8+) | not provided | built in, can share the DKIM key |
 | Moderation | Sieve scripts (RFC 5228/5429): built-in open/subscribers/posters/moderated modes, or a custom script | rules/chains configured via the DB or web UI | mail-command driven, flat-file config | scenarios configured via the DB or web UI |
 | Membership storage | flat-file seed + SQLite | relational DB (Django ORM) | flat text files (mbox-style directories) | relational DB |
-| Bounce handling | VERP, automatic scoring and delivery disabling | VERP, bounce processing | VERP, automated bounce handling (`mlmmj-bounce`) | VERP, bounce processing |
+| Bounce handling | VERP and scoring; what follows is a Sieve script (default: disable delivery at a threshold) | VERP, bounce processing | VERP, automated bounce handling (`mlmmj-bounce`) | VERP, bounce processing |
 | Archiving | not yet — planned (see [Status / roadmap](#status--roadmap)) | yes (HyperKitty) | no (left to external tools) | yes |
 
 Mailman 3 and Sympa are mature, full-featured suites with web UIs, archiving and far more
@@ -323,6 +323,7 @@ sieve_scripts/
   after.d/*.sieve                     # global "after" drop-ins
   domains/<domain>/before.d/*.sieve   # per-domain before
   domains/<domain>/after.d/*.sieve    # per-domain after
+  bounce.sieve                        # replaces the built-in bounce script (see "Bounce handling")
 ```
 
 The named **moderation policies** are what a list's `policy` field selects (a built-in name, or a
@@ -388,11 +389,62 @@ Every delivered copy carries a per-recipient VERP return path
 (`dev+bounce=user=example.com@lists.example.org`), so a delivery failure produces a DSN
 addressed back to the failing subscriber. carriers recognises those bounce addresses on ingress,
 classifies the DSN (permanent `5.x.x` vs transient `4.x.x`), and adds a weight to the
-subscriber's running bounce score. When the score reaches the configured `threshold` (see the
-`[bounce]` section of [`examples/carriers.toml`](examples/carriers.toml)), delivery to that
-address is disabled — it is skipped as a recipient — until an operator runs
-`carriers member enable <list> <address>`, which clears the score and restores delivery.
-`carriers member list` shows the current bounce score and disabled state.
+subscriber's running bounce score. `carriers member list` shows the current score and disabled
+state.
+
+That much is carriers' own accounting and always happens. What *follows* from a bounce is a
+Sieve script, `bounce.sieve`, like every other policy decision here. The message it runs against
+is the DSN itself, so ordinary Sieve tests apply to it; everything carriers already worked out is
+exposed as environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `vnd.carriers.bounce_address` | the subscriber this DSN is about |
+| `vnd.carriers.bounce_kind` | `hard` (permanent, `5.x.x`) or `soft` (transient, `4.x.x`) |
+| `vnd.carriers.bounce_status` | the DSN status it was classified from, e.g. `5.1.1` |
+| `vnd.carriers.bounce_score` | the subscriber's running score, including this bounce |
+| `vnd.carriers.bounce_weight` | what this bounce added to that score |
+| `vnd.carriers.bounce_threshold` | the configured `[bounce] threshold` |
+| `vnd.carriers.bounce_over_threshold` | `yes` if the score has reached the threshold |
+| `vnd.carriers.bounce_disabled` | `yes` if delivery was *already* disabled before this bounce |
+
+A DSN is never distributed, held or refused, so the ordinary Sieve actions have nothing to act on
+in this tier. Instead the script acts through two primitives carriers provides here:
+
+- `disable_delivery()` — stop delivering this list to the bouncing address. The member keeps
+  their subscription and roles; they are skipped as a recipient until an operator runs
+  `carriers member enable <list> <address>`, which clears the score and restores delivery.
+- `http_request(method, url, body)` — tell an external system, and evaluate to the HTTP status
+  code it answered with, or `0` if the request could not be made at all (unreachable, untrusted
+  TLS, timed out). A non-empty body is sent as `application/json`. The call blocks the DSN's SMTP
+  transaction and is abandoned after 10 seconds.
+
+Calls are expressions, so they need `vnd.stalwart.expressions` and a `let` to land in:
+
+```sieve
+require ["variables", "environment", "vnd.stalwart.expressions"];
+
+if string :is "${env.vnd.carriers.bounce_over_threshold}" "yes" {
+    let "disabled" "disable_delivery()";
+}
+```
+
+That is the shipped default, and it reproduces what carriers used to do in hardcoded Rust:
+disable delivery once the score reaches the threshold, and otherwise nothing. Dropping a
+`bounce.sieve` into the Sieve root **replaces** it — unlike the `.d` drop-in directories, which
+add to what is already there — because a deployment that wants different consequences usually
+needs the default gone rather than wrapped. The most common reason is that subscription state
+lives somewhere else: [`examples/sieve_scripts/bounce.sieve`](examples/sieve_scripts/bounce.sieve)
+reports every bounce to an external member database over HTTP and disables nothing locally,
+leaving that system to decide whether a subscription should end.
+
+Two things to know when writing one. `${...}` interpolation happens in `set`, not inside an
+expression, so build a value first and pass the variable in bare
+(`set "body" "…${env.vnd.carriers.bounce_address}…"; let "s" "http_request('POST', url, body)";`).
+And comparing an environment variable against a literal number in an expression compares them
+numerically (`eval "env.vnd.carriers.bounce_score >= 10"`), while comparing two environment
+variables against each other compares them as text — which is why the one comparison the default
+needs, score against threshold, is precomputed as `bounce_over_threshold`.
 
 ## CLI
 
@@ -477,6 +529,10 @@ verification/chain-extension (see "DKIM2 support"), smarthost delivery, flat-fil
 membership (independent subscriber, poster and moderator roles), key generation, and an
 in-process end-to-end test harness (`carriers-testkit`) with mock DNS + a scoring SMTP sink.
 
+Bounce *consequences* are a Sieve script too (see "Bounce handling"), with `disable_delivery()`
+and `http_request()` primitives — so a deployment whose subscription state is owned by an
+external system can report bounces to it and leave that state alone.
+
 Deferred / ideas:
 
 - STARTTLS / implicit TLS on the listener
@@ -490,9 +546,12 @@ Deferred / ideas:
   still go out under the list's own aligned identity instead
 - richer policy context exposed to scripts: DMARC/DKIM/SPF results are now exposed (see "DMARC
   enforcement gate"); still open: spam-filter results, message size
-- custom Sieve functions registered via the runtime builder's `with_functions`, so policy
-  scripts can call carriers-provided helpers — e.g. stripping an attachment, checking a value
-  against an external service, or rewriting a header
+- widen the host functions beyond the bounce tier: `http_request()` and `disable_delivery()` are
+  registered engine-wide but only implemented for `bounce.sieve` (calling one elsewhere fails the
+  script), since an HTTP round trip inside a posting decision holds open the *sender's* SMTP
+  transaction and wants its own thinking. The same mechanism would carry carriers-provided
+  helpers for the moderation tiers — stripping an attachment, checking a value against an
+  external service, rewriting a header
 - a further, list-independent Sieve tier that runs *before* a message is even matched to a list
   (upstream of loop/duplicate detection and the before/after tiers described above), for checks
   that don't need list membership at all — e.g. rejecting anything over a given size regardless

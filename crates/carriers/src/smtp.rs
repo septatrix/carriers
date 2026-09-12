@@ -16,13 +16,14 @@ use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use carriers_core::Error as CoreError;
-use carriers_core::bounce::{self, BounceKind};
+use carriers_core::bounce::{self, BounceFacts, BounceKind};
 use carriers_core::config::Protocol;
 use carriers_core::list::List;
 use carriers_core::pipeline::{self, Disposition, decode_verp};
 use carriers_core::sign::Ingress;
 
 use crate::deliver::deliver;
+use crate::hooks::BounceHooks;
 use crate::state::AppState;
 
 pub async fn serve(state: Arc<AppState>) -> Result<()> {
@@ -224,7 +225,9 @@ async fn process(
     for recipient in recipients {
         let reply = match recipient {
             Recipient::Post(list) => post_reply(state, list, ingress, raw).await,
-            Recipient::Bounce { list, address } => bounce_reply(state, list, address, raw).await,
+            Recipient::Bounce { list, address } => {
+                bounce_reply(state, list, address, ingress, raw).await
+            }
         };
         replies.push(reply);
     }
@@ -289,9 +292,10 @@ async fn bounce_reply(
     state: &Arc<AppState>,
     list: &Arc<List>,
     address: &str,
+    ingress: &Ingress,
     raw: &[u8],
 ) -> String {
-    match handle_bounce(state, list, address, raw).await {
+    match handle_bounce(state, list, address, ingress, raw).await {
         Ok(()) => "250 2.1.5 Bounce recorded\r\n".to_string(),
         Err(err) => {
             error!(list = %list.name, address, %err, "recording bounce failed");
@@ -300,16 +304,20 @@ async fn bounce_reply(
     }
 }
 
-/// Record a bounce (DSN) for a subscriber, disabling delivery once their score crosses the
-/// configured threshold.
+/// Record a bounce (DSN) for a subscriber and run the bounce script over it.
+///
+/// Recording the score is carriers' own accounting and always happens; what *follows* from it —
+/// disabling delivery, telling an external system, nothing at all — is the script's to decide
+/// (see `PolicyEngine::evaluate_bounce`), acting through the primitives in [`crate::hooks`].
 async fn handle_bounce(
     state: &Arc<AppState>,
     list: &Arc<List>,
     address: &str,
+    ingress: &Ingress,
     raw: &[u8],
 ) -> anyhow::Result<()> {
-    let kind = bounce::classify(raw);
-    let weight = match kind {
+    let bounce = bounce::classify(raw);
+    let weight = match bounce.kind {
         BounceKind::Hard => state.config.bounce.hard_weight,
         BounceKind::Soft => state.config.bounce.soft_weight,
         BounceKind::Unknown => {
@@ -317,15 +325,44 @@ async fn handle_bounce(
             return Ok(());
         }
     };
-    match state
+
+    let Some(recorded) = state
         .store
-        .record_bounce(&list.name, address, weight, state.config.bounce.threshold)
+        .record_bounce(&list.name, address, weight)
         .await?
-    {
-        Some(true) => warn!(list = %list.name, address, ?kind, "delivery disabled after bounces"),
-        Some(false) => info!(list = %list.name, address, ?kind, "recorded bounce"),
-        None => info!(list = %list.name, address, "bounce for non-member; ignored"),
-    }
+    else {
+        info!(list = %list.name, address, "bounce for non-member; ignored");
+        return Ok(());
+    };
+    info!(
+        list = %list.name,
+        address,
+        kind = bounce.kind.as_str(),
+        score = recorded.score,
+        "recorded bounce"
+    );
+
+    let facts = BounceFacts {
+        address: address.to_string(),
+        kind: bounce.kind,
+        status: bounce.status,
+        score: recorded.score,
+        weight,
+        threshold: state.config.bounce.threshold,
+        disabled: recorded.disabled,
+    };
+    let hooks = BounceHooks::new(&state.http, &state.store, &list.name, address);
+    state
+        .policy
+        .evaluate_bounce(
+            &list.name,
+            &list.list_id(),
+            &ingress.mail_from,
+            raw,
+            &facts,
+            &hooks,
+        )
+        .await?;
     Ok(())
 }
 

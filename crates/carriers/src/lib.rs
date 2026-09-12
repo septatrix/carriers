@@ -3,5 +3,6 @@
 //! the `carriers` binary. The CLI itself lives in `main.rs`.
 
 pub mod deliver;
+pub mod hooks;
 pub mod smtp;
 pub mod state;

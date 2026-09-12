@@ -58,11 +58,13 @@ pub struct Config {
     pub bounce: BounceConfig,
 }
 
-/// Controls when a repeatedly-bouncing subscriber has delivery disabled.
+/// How a bounce is weighed, and the score the bounce script is told to treat as decisive.
 ///
-/// Each bounce adds a weight to the subscriber's running score; when the score reaches
-/// `threshold`, delivery to that address is disabled until an operator re-enables it with
-/// `carriers member enable`.
+/// Each bounce adds a weight to the subscriber's running score. `threshold` is reported to the
+/// bounce script (see `crate::policy::PolicyEngine::evaluate_bounce`) rather than enforced here:
+/// the shipped `bounce.sieve` disables delivery when the score reaches it, until an operator runs
+/// `carriers member enable`, but a deployment that replaces that script decides for itself what
+/// the threshold means — or ignores it entirely.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BounceConfig {

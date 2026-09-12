@@ -94,21 +94,32 @@ async fn record_message_deduplicates() {
 }
 
 #[tokio::test]
-async fn bounces_disable_delivery_then_enable_restores_it() {
+async fn recording_a_bounce_only_does_the_accounting() {
     let store = Store::open_in_memory().await.unwrap();
     store
         .add_member("dev", "alice@example.com", true, false, false)
         .await
         .unwrap();
 
-    // threshold 5.0, hard weight 3.0: one hard bounce is below threshold, two crosses it.
-    assert_eq!(
-        store
-            .record_bounce("dev", "alice@example.com", 3.0, 5.0)
-            .await
-            .unwrap(),
-        Some(false),
-        "first hard bounce does not yet disable"
+    // Recording accumulates the score and nothing more: whether a score is worth acting on is
+    // the bounce script's call, not the store's (see `PolicyEngine::evaluate_bounce`).
+    let first = store
+        .record_bounce("dev", "alice@example.com", 3.0)
+        .await
+        .unwrap()
+        .expect("alice is a member");
+    assert_eq!(first.score, 3.0);
+    assert!(!first.disabled);
+
+    let second = store
+        .record_bounce("dev", "alice@example.com", 3.0)
+        .await
+        .unwrap()
+        .expect("alice is a member");
+    assert_eq!(second.score, 6.0);
+    assert!(
+        !second.disabled,
+        "a high score does not disable delivery by itself"
     );
     assert!(
         store
@@ -119,26 +130,57 @@ async fn bounces_disable_delivery_then_enable_restores_it() {
         "still a deliverable recipient"
     );
 
-    assert_eq!(
+    // A bounce for a non-member has nothing to record.
+    assert!(
         store
-            .record_bounce("dev", "alice@example.com", 3.0, 5.0)
+            .record_bounce("dev", "stranger@nowhere.example", 3.0)
             .await
-            .unwrap(),
-        Some(true),
-        "second hard bounce crosses the threshold and disables delivery"
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn disabling_delivery_stops_it_and_enabling_restores_it() {
+    let store = Store::open_in_memory().await.unwrap();
+    store
+        .add_member("dev", "alice@example.com", true, false, false)
+        .await
+        .unwrap();
+    store
+        .record_bounce("dev", "alice@example.com", 3.0)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .disable_delivery("dev", "alice@example.com")
+            .await
+            .unwrap()
     );
     assert!(
         store.subscribers("dev").await.unwrap().is_empty(),
-        "bounce-disabled address is no longer a delivery recipient"
+        "a disabled address is no longer a delivery recipient"
     );
-
-    // A bounce for a non-member is a no-op.
-    assert_eq!(
+    // Repeating it is a no-op, not a failure — a script may well disable on every bounce.
+    assert!(
         store
-            .record_bounce("dev", "stranger@nowhere.example", 3.0, 5.0)
+            .disable_delivery("dev", "alice@example.com")
+            .await
+            .unwrap()
+    );
+    // The subscription and the score survive; only delivery stopped.
+    let members = store.all_members("dev").await.unwrap();
+    assert!(members[0].subscribed);
+    assert_eq!(members[0].bounce_score, 3.0);
+    assert!(members[0].bounce_disabled);
+
+    assert!(
+        !store
+            .disable_delivery("dev", "stranger@nowhere.example")
             .await
             .unwrap(),
-        None
+        "nothing to disable for a non-member"
     );
 
     // Re-enabling clears the score and restores delivery.

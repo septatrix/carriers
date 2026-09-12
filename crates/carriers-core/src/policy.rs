@@ -77,6 +77,15 @@
 //! `vnd.carriers.dmarc_*`/`dkim_result`/`spf_result` environment variables to every tier, not just
 //! these two built-ins).
 //!
+//! ## Bounce decisions
+//!
+//! One more tier runs on a different kind of message entirely: `bounce.sieve`, over a delivery
+//! failure (DSN) rather than a post — see [`PolicyEngine::evaluate_bounce`]. carriers scores the
+//! bounce itself and hands the script the facts ([`crate::bounce::BounceFacts`]); the script
+//! decides what follows. A DSN is never distributed, held or refused, so this is the one tier
+//! whose conclusions are not a [`PolicyDecision`]: it acts by *calling* [`BounceFunctions`] —
+//! disabling delivery, reporting to an external system — and its Sieve actions are ignored.
+//!
 //! ## Global policy
 //!
 //! Further, optional scripts may run for *every* list, wrapped around that list's own `policy`:
@@ -114,11 +123,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use sieve::Sieve;
 
+use crate::bounce::BounceFacts;
 use crate::error::{Error, Result};
 use crate::sieve_engine::{
-    DuplicateStore, ExternalLists, NoDuplicates, SieveEngine, SieveOutcome, SieveRun,
+    DuplicateStore, ExternalLists, FunctionSpec, FunctionValue, NoDuplicates, NoFunctions,
+    SieveEngine, SieveFunctions, SieveOutcome, SieveRun,
 };
 
 /// External list names exposed to policy scripts via the Sieve `:list` match.
@@ -131,6 +143,66 @@ pub const ENV_LIST: &str = "vnd.carriers.list";
 /// Environment variable exposing the current list's `List-Id` to scripts (used by the built-in
 /// loop check).
 pub const ENV_LIST_ID: &str = "vnd.carriers.list_id";
+
+/// Host functions a script may call (see [`FunctionSpec`]). Only the bounce tier implements
+/// them today — every other tier passes [`NoFunctions`], so a call there fails the script rather
+/// than quietly doing nothing. They are nonetheless registered engine-wide, because the compiler
+/// is shared: a name must be known at compile time for any script to name it at all.
+pub const FN_HTTP_REQUEST: &str = "http_request";
+pub const FN_DISABLE_DELIVERY: &str = "disable_delivery";
+
+const FUNCTIONS: &[FunctionSpec] = &[
+    FunctionSpec {
+        name: FN_HTTP_REQUEST,
+        args: 3,
+    },
+    FunctionSpec {
+        name: FN_DISABLE_DELIVERY,
+        args: 0,
+    },
+];
+
+/// The primitives a bounce script can act through — the two ways it can reach out of the script
+/// and change something. Implemented by the daemon, which owns the network and the store.
+///
+/// Both block the script (and with it the DSN's SMTP transaction) until they return, so an
+/// implementation must bound how long it takes.
+#[async_trait]
+pub trait BounceFunctions: Send + Sync {
+    /// `http_request(method, url, body)` — tell an external system about this bounce, returning
+    /// the HTTP status code, or `0` if the request could not be made at all (DNS, TLS, timeout).
+    /// A script can branch on that: the point of reporting a status instead of failing the script
+    /// is that an unreachable callback is a fact to handle, not a reason to abandon the rest of
+    /// the script.
+    async fn http_request(&self, method: &str, url: &str, body: &str) -> Result<i64>;
+
+    /// `disable_delivery()` — stop delivering this list to the address this DSN is about. The
+    /// member keeps their subscription and roles; they are skipped as a recipient until an
+    /// operator runs `carriers member enable`. Returns whether the address is a member at all.
+    async fn disable_delivery(&self) -> Result<bool>;
+}
+
+/// Adapts [`BounceFunctions`] to the engine's index-based dispatch, so the daemon implements a
+/// trait in carriers' own vocabulary rather than one keyed by a position in [`FUNCTIONS`].
+struct BounceDispatch<'a>(&'a dyn BounceFunctions);
+
+#[async_trait]
+impl SieveFunctions for BounceDispatch<'_> {
+    async fn call(&self, index: usize, args: Vec<String>) -> Result<FunctionValue> {
+        // Argument count is enforced by the compiler against `FUNCTIONS`, so a call that gets
+        // here has the arity its spec declares.
+        let arg = |n: usize| args.get(n).map(String::as_str).unwrap_or_default();
+        match FUNCTIONS.get(index).map(|spec| spec.name) {
+            Some(FN_HTTP_REQUEST) => Ok(FunctionValue::Integer(
+                self.0.http_request(arg(0), arg(1), arg(2)).await?,
+            )),
+            Some(FN_DISABLE_DELIVERY) => Ok(FunctionValue::Bool(self.0.disable_delivery().await?)),
+            _ => Err(Error::Config(format!(
+                "Sieve script called unknown host function #{index}"
+            ))),
+        }
+    }
+}
 
 /// Names of the built-in policies. These are reserved: an administrator's `<name>.sieve` file
 /// may not use them.
@@ -250,6 +322,7 @@ pub struct PolicyEngine {
     dmarc_before_gate: Arc<Sieve>,
     dmarc_after_gate: Arc<Sieve>,
     munge_from_script: Arc<Sieve>,
+    bounce_script: Arc<Sieve>,
     policies: HashMap<String, Arc<Sieve>>,
     global_before: Vec<Arc<Sieve>>,
     global_after: Vec<Arc<Sieve>>,
@@ -259,7 +332,10 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     /// An engine with only the built-in scripts compiled.
     pub fn new() -> Result<Self> {
-        let engine = SieveEngine::new(&[LIST_SUBSCRIBERS, LIST_POSTERS, LIST_MODERATORS]);
+        let engine = SieveEngine::new(
+            &[LIST_SUBSCRIBERS, LIST_POSTERS, LIST_MODERATORS],
+            FUNCTIONS,
+        );
         let compile_builtin = |name: &str, src: &str| {
             engine
                 .compile(src.as_bytes())
@@ -287,6 +363,8 @@ impl PolicyEngine {
             "munge-from",
             include_str!("builtin_policies/munge-from.sieve"),
         )?;
+        let bounce_script =
+            compile_builtin("bounce", include_str!("builtin_policies/bounce.sieve"))?;
 
         let mut policies = HashMap::new();
         for (name, script) in BUILTIN_SCRIPTS {
@@ -300,6 +378,7 @@ impl PolicyEngine {
             dmarc_before_gate,
             dmarc_after_gate,
             munge_from_script,
+            bounce_script,
             policies,
             global_before: Vec::new(),
             global_after: Vec::new(),
@@ -411,11 +490,17 @@ impl PolicyEngine {
     ///   after.d/*.sieve                     # global "after" drop-ins
     ///   domains/<domain>/before.d/*.sieve   # per-domain before
     ///   domains/<domain>/after.d/*.sieve    # per-domain after
+    ///   bounce.sieve                        # replaces the built-in bounce script
     /// ```
     ///
     /// Every part is optional: a missing subdirectory is simply skipped. This just discovers the
     /// conventional paths and feeds them to [`load`](Self::load) / the `with_global_*` /
     /// `with_domain_*` builders — the evaluation model is unchanged.
+    ///
+    /// `bounce.sieve` is the one entry that *replaces* rather than adds to a built-in: a
+    /// deployment that wants different consequences for a bounce (report it and let an external
+    /// system decide, say) needs the default "disable at the threshold" behaviour gone, not
+    /// wrapped.
     pub fn load_root(root: &Path) -> Result<Self> {
         let moderation = root.join("moderation_policies");
         let mut this = if moderation.is_dir() {
@@ -423,6 +508,11 @@ impl PolicyEngine {
         } else {
             Self::new()?
         };
+
+        let bounce = root.join("bounce.sieve");
+        if bounce.is_file() {
+            this.bounce_script = this.compile_file(&bounce, "bounce")?;
+        }
 
         let before = root.join("before.d");
         if before.is_dir() {
@@ -571,6 +661,7 @@ impl PolicyEngine {
                 &env,
                 &NO_LISTS,
                 &NoDuplicates,
+                &NoFunctions,
             )
             .await?;
         Ok(run.message.unwrap_or_else(|| raw.to_vec()))
@@ -598,9 +689,48 @@ impl PolicyEngine {
                 &env,
                 &NO_LISTS,
                 &NoDuplicates,
+                &NoFunctions,
             )
             .await?;
         Ok(run.message.unwrap_or_else(|| raw.to_vec()))
+    }
+
+    /// Run the bounce script (`bounce.sieve`, or the deployment's replacement — see
+    /// [`PolicyEngine::load_root`]) for one delivery failure.
+    ///
+    /// The message is the DSN itself, so the script can test it like any other message; `facts`
+    /// is what carriers already worked out about the bounce, exposed as `vnd.carriers.bounce_*`
+    /// environment variables (see [`BounceFacts::env_pairs`]).
+    ///
+    /// This tier reaches its conclusions by *calling* [`BounceFunctions`], not by returning one:
+    /// a DSN is never distributed, held, or refused, so the ordinary Sieve actions have nothing
+    /// to act on here and are ignored. What a bounce leads to is whatever the script does through
+    /// the primitives — disabling delivery, telling an external system, or nothing at all.
+    pub async fn evaluate_bounce(
+        &self,
+        list_name: &str,
+        list_id: &str,
+        mail_from: &str,
+        raw: &[u8],
+        facts: &BounceFacts,
+        functions: &dyn BounceFunctions,
+    ) -> Result<()> {
+        let facts = facts.env_pairs();
+        let mut env = vec![(ENV_LIST, list_name), (ENV_LIST_ID, list_id)];
+        env.extend(facts.iter().map(|(k, v)| (*k, v.as_str())));
+        self.engine
+            .run(
+                "bounce",
+                &self.bounce_script,
+                raw,
+                mail_from,
+                &env,
+                &NO_LISTS,
+                &NoDuplicates,
+                &BounceDispatch(functions),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Evaluate the named policy against a message.
@@ -855,8 +985,19 @@ impl PolicyEngine {
     ) -> Result<SieveRun> {
         let mut env = vec![(ENV_LIST, list_name), (ENV_LIST_ID, list_id)];
         env.extend_from_slice(extra_env);
+        // Host functions are the bounce tier's alone for now (see `FUNCTIONS`): a moderation or
+        // drop-in script that calls one fails rather than silently getting a value back.
         self.engine
-            .run(name, script, raw, mail_from, &env, lists, duplicates)
+            .run(
+                name,
+                script,
+                raw,
+                mail_from,
+                &env,
+                lists,
+                duplicates,
+                &NoFunctions,
+            )
             .await
     }
 }

@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sieve::{Compiler, Envelope, Event, Input, Runtime, Script, Sieve};
+use sieve::compiler::grammar::Capability;
+use sieve::runtime::Variable;
+use sieve::{Compiler, Envelope, Event, FunctionMap, Input, Runtime, Script, Sieve};
 
 use crate::error::{Error, Result};
 
@@ -38,6 +40,58 @@ pub struct NoDuplicates;
 impl DuplicateStore for NoDuplicates {
     async fn seen_before(&self, _id: &str, _expiry: u64) -> Result<bool> {
         Ok(false)
+    }
+}
+
+/// A host function exposed to scripts, as its script-visible name and the number of arguments it
+/// takes. Both are fixed at compile time: [`SieveEngine::new`] registers the whole catalogue with
+/// the compiler, which rejects a call to an unknown name or with the wrong argument count.
+pub struct FunctionSpec {
+    pub name: &'static str,
+    pub args: u32,
+}
+
+/// The value a host function hands back to the script that called it.
+pub enum FunctionValue {
+    Bool(bool),
+    Integer(i64),
+    String(String),
+}
+
+impl From<FunctionValue> for Variable {
+    fn from(value: FunctionValue) -> Self {
+        match value {
+            FunctionValue::Bool(v) => v.into(),
+            FunctionValue::Integer(v) => v.into(),
+            FunctionValue::String(v) => v.into(),
+        }
+    }
+}
+
+/// Implements the host functions declared to [`SieveEngine::new`]. A call is dispatched by the
+/// function's index in that catalogue, with its arguments stringified in the order the script
+/// wrote them.
+///
+/// Unlike this module's other traits, an implementation is expected to act on the world outside
+/// the message — that is the whole point: these are how a script reaches a database or a remote
+/// service (see `policy::BounceFunctions`). A call blocks the script, so an implementation owes
+/// the caller a bounded running time.
+#[async_trait]
+pub trait SieveFunctions: Send + Sync {
+    async fn call(&self, index: usize, args: Vec<String>) -> Result<FunctionValue>;
+}
+
+/// A [`SieveFunctions`] that implements nothing: any call fails the script. Used by the tiers
+/// that expose no host functions at all, so calling one there fails loudly rather than quietly
+/// returning a value that looks like it did something.
+pub struct NoFunctions;
+
+#[async_trait]
+impl SieveFunctions for NoFunctions {
+    async fn call(&self, _index: usize, _args: Vec<String>) -> Result<FunctionValue> {
+        Err(Error::Config(
+            "this script tier exposes no callable functions".to_string(),
+        ))
     }
 }
 
@@ -79,14 +133,30 @@ pub struct SieveEngine {
 
 impl SieveEngine {
     /// `valid_lists` are the external list names (`:list "from" "<name>"`) scripts may use; any
-    /// other name is simply never true.
-    pub fn new(valid_lists: &[&'static str]) -> Self {
-        let mut runtime = Runtime::new();
+    /// other name is simply never true. `functions` is the catalogue of host functions scripts
+    /// may call; a call to one surfaces to the [`SieveFunctions`] given to [`SieveEngine::run`],
+    /// identified by the function's index here.
+    pub fn new(valid_lists: &[&'static str], functions: &[FunctionSpec]) -> Self {
+        // `vnd.stalwart.expressions` is off by default but is the only way a script can call a
+        // host function at all (there is no statement form — a call is an expression), so the
+        // catalogue above would be unreachable without it.
+        let mut runtime = Runtime::new().with_capability(Capability::Expressions);
         for name in valid_lists {
             runtime.set_valid_ext_list(*name);
         }
+
+        // Registered as *external* functions — declared to the compiler (so a script can call
+        // them, and is rejected at compile time if it gets the name or argument count wrong) but
+        // deliberately left unimplemented in the runtime, which is what makes each call surface
+        // as an `Event::Function` we can answer asynchronously. A natively registered function
+        // would have to be a plain `fn`, with no way to await a database or a network round trip.
+        let mut fnc_map = FunctionMap::new();
+        for (index, spec) in functions.iter().enumerate() {
+            fnc_map = fnc_map.with_external_function(spec.name, index as u32, spec.args);
+        }
+
         SieveEngine {
-            compiler: Compiler::new(),
+            compiler: Compiler::new().register_functions(&mut fnc_map),
             runtime,
         }
     }
@@ -104,7 +174,8 @@ impl SieveEngine {
     ///
     /// `mail_from` sets the envelope sender used by `address`/`envelope` tests; `env_vars` are
     /// exposed to the script via the "environment" extension; `lists` answers `:list` tests;
-    /// `duplicates` answers the `duplicate` test.
+    /// `duplicates` answers the `duplicate` test; `functions` implements the host functions the
+    /// script calls.
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
@@ -115,6 +186,7 @@ impl SieveEngine {
         env_vars: &[(&str, &str)],
         lists: &dyn ExternalLists,
         duplicates: &dyn DuplicateStore,
+        functions: &dyn SieveFunctions,
     ) -> Result<SieveRun> {
         let mut instance = self.runtime.filter(raw);
         if !mail_from.is_empty() {
@@ -142,6 +214,13 @@ impl SieveEngine {
                     .into(),
                 Event::DuplicateId { id, expiry, .. } => {
                     duplicates.seen_before(&id, expiry).await?.into()
+                }
+                Event::Function { id, arguments } => {
+                    let args = arguments
+                        .iter()
+                        .map(|arg| arg.to_string().into_owned())
+                        .collect();
+                    Input::FncResult(functions.call(id as usize, args).await?.into())
                 }
                 Event::MailboxExists { .. } => false.into(),
                 Event::IncludeScript { optional, .. } => {

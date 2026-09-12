@@ -3,7 +3,10 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use carriers_core::policy::{MembershipSets, PolicyDecision, PolicyEngine, PolicyOutcome};
+use carriers_core::bounce::{BounceFacts, BounceKind};
+use carriers_core::policy::{
+    BounceFunctions, MembershipSets, PolicyDecision, PolicyEngine, PolicyOutcome,
+};
 use carriers_core::sieve_engine::{DuplicateStore, NoDuplicates};
 
 /// A stand-in `List-Id` for the tests; the built-in checks don't run through `evaluate*`, so its
@@ -824,4 +827,207 @@ async fn apply_munge_from_rewrites_from_and_reply_to() {
     // The body and other headers survive untouched.
     assert!(out.contains("To: dev@lists.example.org"));
     assert!(out.contains("body"));
+}
+
+// --- The bounce tier ---------------------------------------------------------------------
+
+/// A DSN for a permanently failed delivery, as the bounce script sees it.
+const DSN: &[u8] = concat!(
+    "From: MAILER-DAEMON@mx.example.com\r\n",
+    "To: dev+bounce=bob=example.com@lists.example.org\r\n",
+    "Subject: Undelivered Mail Returned to Sender\r\n",
+    "Content-Type: message/delivery-status\r\n",
+    "\r\n",
+    "Final-Recipient: rfc822; bob@example.com\r\n",
+    "Action: failed\r\n",
+    "Status: 5.1.1\r\n",
+)
+.as_bytes();
+
+/// Records what the bounce script asked carriers to do, standing in for the daemon's real
+/// primitives (which reach the network and the store).
+#[derive(Default)]
+struct RecordingFunctions {
+    calls: Mutex<Vec<String>>,
+    /// What `http_request` reports back to the script.
+    status: i64,
+}
+
+#[async_trait::async_trait]
+impl BounceFunctions for RecordingFunctions {
+    async fn http_request(
+        &self,
+        method: &str,
+        url: &str,
+        body: &str,
+    ) -> carriers_core::Result<i64> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("http {method} {url} {body}"));
+        Ok(self.status)
+    }
+
+    async fn disable_delivery(&self) -> carriers_core::Result<bool> {
+        self.calls.lock().unwrap().push("disable".to_string());
+        Ok(true)
+    }
+}
+
+impl RecordingFunctions {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+fn facts(score: f64, disabled: bool) -> BounceFacts {
+    BounceFacts {
+        address: "bob@example.com".to_string(),
+        kind: BounceKind::Hard,
+        status: Some("5.1.1".to_string()),
+        score,
+        weight: 3.0,
+        threshold: 5.0,
+        disabled,
+    }
+}
+
+async fn run_bounce(engine: &PolicyEngine, facts: &BounceFacts) -> RecordingFunctions {
+    let functions = RecordingFunctions::default();
+    engine
+        .evaluate_bounce("dev", LIST_ID, "", DSN, facts, &functions)
+        .await
+        .unwrap();
+    functions
+}
+
+#[tokio::test]
+async fn builtin_bounce_script_disables_delivery_only_at_the_threshold() {
+    let engine = PolicyEngine::new().unwrap();
+
+    // Below the threshold the bounce is recorded (in Rust, before the script runs) and nothing
+    // else happens.
+    let below = run_bounce(&engine, &facts(3.0, false)).await;
+    assert!(below.calls().is_empty(), "{:?}", below.calls());
+
+    // Reaching it disables delivery — the historical hardcoded behaviour, now a script decision.
+    let at = run_bounce(&engine, &facts(6.0, false)).await;
+    assert_eq!(at.calls(), vec!["disable".to_string()]);
+}
+
+#[tokio::test]
+async fn a_bounce_script_can_report_a_bounce_without_changing_any_state() {
+    // The shape a deployment whose subscription state lives in an external system needs: the
+    // bounce is reported, and carriers changes nothing by itself. This also covers the facts
+    // reaching the script, a numeric comparison against a literal, and `bounce.sieve` in the
+    // Sieve root replacing the built-in rather than running alongside it (the built-in would
+    // have disabled delivery at this score).
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("bounce.sieve"),
+        r#"
+require ["variables", "environment", "vnd.stalwart.expressions"];
+
+if eval "env.vnd.carriers.bounce_score >= 5" {
+    set "body" "${env.vnd.carriers.bounce_address} ${env.vnd.carriers.bounce_kind} ${env.vnd.carriers.bounce_status} ${env.vnd.carriers.list}";
+    let "status" "http_request('POST', 'https://db.example.org/bounces', body)";
+}
+"#,
+    )
+    .unwrap();
+    let engine = PolicyEngine::load_root(root.path()).unwrap();
+
+    let reported = run_bounce(&engine, &facts(6.0, false)).await;
+    assert_eq!(
+        reported.calls(),
+        vec!["http POST https://db.example.org/bounces bob@example.com hard 5.1.1 dev".to_string()]
+    );
+
+    // A score below the script's own threshold reports nothing — and note 10 vs 5 compares as a
+    // number, not as text, which is what `eval` against a literal buys over a string test.
+    let quiet = run_bounce(&engine, &facts(4.0, false)).await;
+    assert!(quiet.calls().is_empty(), "{:?}", quiet.calls());
+}
+
+#[tokio::test]
+async fn host_functions_are_rejected_outside_the_bounce_tier() {
+    // The primitives exist for the bounce tier alone; a moderation policy that calls one fails
+    // loudly rather than quietly receiving a value that looks like it did something.
+    let dir = tempfile::tempdir().unwrap();
+    write_policy(
+        dir.path(),
+        "callout",
+        r#"
+require ["variables", "vnd.stalwart.expressions"];
+let "status" "http_request('POST', 'https://db.example.org/posts', 'hi')";
+"#,
+    );
+    let engine = PolicyEngine::load(dir.path()).unwrap();
+
+    let err = engine
+        .evaluate(
+            "callout",
+            "dev",
+            LIST_ID,
+            "alice@example.com",
+            &message("alice@example.com"),
+            &sets(),
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("no callable functions"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn the_shipped_example_scripts_compile() {
+    // The examples are documentation people copy from, so a change to the engine that would
+    // invalidate one should fail here rather than in someone's deployment.
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sieve_scripts");
+    PolicyEngine::load_root(&root).unwrap();
+}
+
+#[tokio::test]
+async fn the_example_bounce_script_reports_and_escalates_what_it_cannot_report() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sieve_scripts");
+    let engine = PolicyEngine::load_root(&root).unwrap();
+
+    // Accepted by the member database: the bounce is reported, with the facts interpolated into
+    // the body, and nothing is disabled locally — that call is the external system's to make.
+    let accepted = RecordingFunctions {
+        status: 202,
+        ..Default::default()
+    };
+    engine
+        .evaluate_bounce("dev", LIST_ID, "", DSN, &facts(6.0, false), &accepted)
+        .await
+        .unwrap();
+    let calls = accepted.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        calls[0].starts_with("http POST https://db.example.org/api/mailinglist/bounce"),
+        "{calls:?}"
+    );
+    assert!(
+        calls[0].contains(r#""address": "bob@example.com""#),
+        "{calls:?}"
+    );
+    assert!(!calls.contains(&"disable".to_string()), "{calls:?}");
+
+    // Unreachable (status 0): the script's `error` fails the tier, so the DSN is answered with a
+    // temporary failure and retried by the sending MTA rather than being silently lost.
+    let unreachable = RecordingFunctions::default();
+    let err = engine
+        .evaluate_bounce("dev", LIST_ID, "", DSN, &facts(6.0, false), &unreachable)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Could not report the bounce"),
+        "unexpected error: {err}"
+    );
 }
