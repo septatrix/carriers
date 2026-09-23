@@ -30,10 +30,11 @@ pub struct Ingress {
 ///
 /// Deliberately holds only owned primitives, not the borrowed `DkimOutput`/`ArcOutput`/
 /// `SpfOutput` mail-auth returns: those are tied to the lifetime of the specific
-/// `AuthenticatedMessage` they were computed from, and [`sign_and_seal`] verifies a *different*
-/// (List-header-augmented) byte sequence for the actual seal/sign step. Prepending headers is
-/// DKIM/ARC-safe (established elsewhere in this codebase), so the two verifications agree; this
-/// struct just avoids fighting the borrow checker to prove it.
+/// `AuthenticatedMessage` they were computed from. This verdict is computed once, on the pristine
+/// inbound message, for the Sieve policy tiers; [`sign_and_seal`] independently re-verifies that
+/// same pristine message when it builds the `Authentication-Results` it seals into the ARC set
+/// (see its doc comment). Keeping only owned primitives here avoids threading those borrows across
+/// the transform/sign/seal step.
 pub struct AuthVerdict {
     /// DMARC passed via an aligned, passing DKIM or SPF identity.
     pub dmarc_pass: bool,
@@ -192,13 +193,25 @@ fn domain_of(address: &str) -> &str {
     address.rsplit_once('@').map_or(address, |(_, d)| d)
 }
 
-/// Verify the inbound authentication of `augmented`, then DKIM-sign (unless `skip_own_dkim`) and
-/// ARC-seal it.
+/// Verify the inbound authentication of `original`, then DKIM-sign (unless `skip_own_dkim`) and
+/// ARC-seal `augmented`.
 ///
 /// The returned message is `ARC-* || [DKIM-Signature ||] augmented`: fresh headers prepended to
-/// the untouched `augmented` bytes (which are themselves `List-* || original`). Because the
-/// original bytes are never rewritten, the author's DKIM signature survives and DMARC passes
-/// at the receiver via DKIM alignment; the ARC seal is the backstop for hops that break it.
+/// the untouched `augmented` bytes (which are themselves `List-* || [transformed] original`).
+/// `original` is the pristine inbound message as received; `augmented` is what actually goes out.
+/// They differ by the List-* headers we prepend and, when a list opts in, a DKIM-breaking
+/// transform (Subject prefix / munge-from).
+///
+/// **The authentication recorded in the ARC seal is taken from `original`, not `augmented`.** ARC
+/// exists to carry forward the authentication observed at *ingress*, so a later hop that trusts
+/// this sealer can still honour the author's original result even after an intermediary breaks it.
+/// For a plain List-header prepend the two agree (the author's DKIM doesn't cover the headers we
+/// add). But a Subject prefix / munge-from deliberately invalidates the author's signature on the
+/// outbound copy — verifying *those* bytes would seal a self-inflicted `dkim=fail` and defeat the
+/// whole point of the seal. So DKIM (and any inbound ARC chain, whose message signature such a
+/// transform would likewise break) is verified against `original`, and the author `From` recorded
+/// in the results is `original`'s (munge-from rewrites it in the outbound copy). The AMS we
+/// generate still signs `augmented` — that is the message we are forwarding.
 ///
 /// This does *not* add a DKIM2 chain link, even if the list has one configured: DKIM2 binds the
 /// exact SMTP envelope (`mail_from`/`rcpt_to`), which — unlike ARC/DKIM — varies per recipient
@@ -215,17 +228,27 @@ pub async fn sign_and_seal(
     authenticator: &MessageAuthenticator,
     list: &List,
     hostname: &str,
+    original: &[u8],
     augmented: &[u8],
     ingress: &Ingress,
     skip_own_dkim: bool,
 ) -> Result<Vec<u8>> {
+    // The message we are forwarding: what the list's own DKIM signature and the ARC message
+    // signature (AMS) sign.
     let message = AuthenticatedMessage::parse(augmented)
         .ok_or_else(|| Error::Auth("failed to parse outbound message".into()))?;
 
-    // Evaluate the authentication of the message as we received it. In production these use
-    // live DNS via the shared resolver.
-    let dkim = authenticator.verify_dkim(&message).await;
-    let arc = authenticator.verify_arc(&message).await;
+    // The pristine inbound message, verified to record what we observed at ingress in the ARC seal
+    // — see the doc comment above on why this must be `original`, not `augmented`. In production
+    // these use live DNS via the shared resolver.
+    let ingress_message = AuthenticatedMessage::parse(original)
+        .ok_or_else(|| Error::Auth("failed to parse inbound message".into()))?;
+    let dkim = authenticator.verify_dkim(&ingress_message).await;
+    let arc = authenticator.verify_arc(&ingress_message).await;
+    let from = ingress_message.from().to_string();
+
+    // SPF is a connection/envelope fact, independent of the message bytes, so it reads the same
+    // either way.
     let spf = authenticator
         .verify_spf(SpfParameters::verify_mail_from(
             ingress.remote_ip,
@@ -235,14 +258,14 @@ pub async fn sign_and_seal(
         ))
         .await;
 
-    let from = message.from().to_string();
     let auth_results = AuthenticationResults::new(hostname)
         .with_dkim_results(&dkim, &from)
         .with_spf_mailfrom_result(&spf, ingress.remote_ip, &ingress.mail_from, &ingress.helo)
         .with_arc_result(&arc, ingress.remote_ip);
 
-    // Seal the chain, recording the results above, regardless of `skip_own_dkim` — the seal is
-    // an honest record of what we observed, not a grant of our own reputation.
+    // Seal the chain over the outbound `message`, recording the ingress `auth_results` above,
+    // regardless of `skip_own_dkim` — the seal is an honest record of what we observed, not a
+    // grant of our own reputation.
     let arc_set = list
         .sealer()
         .seal(&message, &auth_results, &arc)

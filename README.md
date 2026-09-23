@@ -44,7 +44,7 @@ crates: `mail-auth` (DKIM/SPF/DMARC/ARC), `mail-parser`, `mail-builder`, `mail-s
 | License | MPL-2.0 (+ the AGPL-3.0 `sieve-rs` dependency) | GPL-3.0-or-later | MIT | GPL-2.0 |
 | Architecture | single binary; SMTP/LMTP listener, relays out via a smarthost | Core + Postorius (web UI) + HyperKitty (archiver), Django/DB-backed | minimal; invoked per message by the local MTA (procmail-style) | full suite: WWSympa web UI plus several daemons, DB-backed |
 | Web UI | none (CLI only) | yes (Postorius) | none | yes (WWSympa) |
-| Author's original DKIM signature | preserved by design — body and existing headers are never rewritten | broken by default — DMARC mitigation munges `From` or wraps the message | preserved *if* the operator leaves the footer/subject-prefix tunables off | broken when DMARC protection is enabled — it rewrites `From` |
+| Author's original DKIM signature | preserved by design — body and existing headers are never rewritten (unless you opt into the DKIM-breaking `subject_prefix`) | broken by default — DMARC mitigation munges `From` or wraps the message | preserved *if* the operator leaves the footer/subject-prefix tunables off | broken when DMARC protection is enabled — it rewrites `From` |
 | List's own aligned DKIM signature | built in, automatic | left to the outbound MTA | not provided | built in (`Mail::DKIM`) |
 | ARC sealing | built in, automatic | built in (3.3.8+) | not provided | built in, can share the DKIM key |
 | Moderation | Sieve scripts (RFC 5228/5429): built-in open/subscribers/posters/moderated modes, or a custom script | rules/chains configured via the DB or web UI | mail-command driven, flat-file config | scenarios configured via the DB or web UI |
@@ -281,9 +281,33 @@ This is a hard, unconditional invariant — there is no config toggle to disable
 `munge_from` DMARC mitigation): filing a message into it rewrites `From` to the list's own posting
 address (embedding the original sender's name) and `Reply-To` back to the original sender, so a
 message can still go out under the list's own aligned identity when its original one can never be
-preserved. Nothing built-in requests this yet — it exists as a mechanism for a future feature that
-would otherwise break the author's DKIM (e.g. an opt-in `Subject` prefix or footer), or for a
-custom script that wants it today.
+preserved. Nothing built-in requests this automatically — it exists as a mechanism for a custom
+script that wants it, and as the recommended companion to the opt-in `Subject` prefix below (any
+transform that breaks the author's DKIM wants the list's own aligned identity to fall back on).
+
+### Subject prefix (opt-in, DKIM-breaking)
+
+A list may set a `subject_prefix` — a bare tag such as `dev` — that carriers wraps in square
+brackets and prepends to every distributed post's `Subject`, so `subject_prefix = "dev"` yields
+`[dev] <original>` (mailman3's `subject_prefix`). It is **off by default and deliberately
+special**: it is the one built-in transform that is *not* DKIM-safe. Every other step only prepends
+headers, leaving the author's original DKIM signature valid; rewriting the signed `Subject` header
+invalidates it, so a post from a domain publishing `p=reject`/`p=quarantine` will then fail DMARC
+at the recipient via the author's identity. The list's *own* signature (added after the rewrite) is
+still valid, so the recommended way to run this is alongside From/Reply-To munging (a policy
+`fileinto "munge-from"`), which moves the aligned identity to the list domain so DMARC passes there
+instead.
+
+Unlike the `List-*` and munge-from transforms — where carriers computes the values in Rust because
+they come from config or from parsing an address — the whole transform here is expressible in
+Sieve, so it lives in the built-in `subject-prefix.sieve`: Rust supplies only the bare tag, and the
+script wraps it in `[...]`, captures the current `Subject` with a `:matches "*"` wildcard, and
+re-`addheader`s it behind the bracketed tag (`deleteheader` + `addheader`), taking the tag alone as
+the whole `Subject` when the message had none. A `Subject` that already carries the bracketed tag
+*at the front* — at the very start, or right after a run of reply/forward markers such as `Re: ` or
+`Fwd: ` — is left alone, so the tag is never stacked; the same string appearing later in the
+`Subject` is treated as ordinary text and still gets prefixed. See the `subject_prefix` field in
+[`examples/lists/dev.toml`](examples/lists/dev.toml).
 
 ### DKIM2 support
 
@@ -471,7 +495,8 @@ per-domain Sieve `.d` drop-in directories wrapped before/after every list's own 
 `.eml` archiving (`fileinto :copy "archive"`), a built-in DMARC enforcement gate that rejects
 unauthenticated mail against an enforcing domain and withholds the list's own DKIM signature
 otherwise (see "DMARC enforcement gate" above), an available From/Reply-To munging mechanism
-(`fileinto "munge-from"`), VERP bounce processing with automatic delivery disabling, loop and
+(`fileinto "munge-from"`), an opt-in DKIM-breaking `Subject` prefix (`subject_prefix`, see "Subject
+prefix" above), VERP bounce processing with automatic delivery disabling, loop and
 duplicate suppression, `List-*` headers, aligned DKIM signing, ARC sealing, DKIM2
 verification/chain-extension (see "DKIM2 support"), smarthost delivery, flat-file lists + SQLite
 membership (independent subscriber, poster and moderator roles), key generation, and an
@@ -485,9 +510,14 @@ Deferred / ideas:
 - message archiving: on-disk `.eml` archiving is implemented (`fileinto :copy "archive"` writes
   each post under a per-list subdirectory — see "Posting policy and moderation"). Still open: a
   search index (full-text over headers/body) for retrieval, and a web archive layered on top
-- opt-in `Subject`-prefix / footer support — for cases where it would break the author's DKIM,
-  the `munge-from` mechanism (see "DMARC enforcement gate") exists precisely to let a message
-  still go out under the list's own aligned identity instead
+- opt-in body **footer** support — the `Subject` prefix half of this is now implemented (see
+  "Subject prefix" above); a footer is still open. Both break the author's DKIM, which is why the
+  `munge-from` mechanism (see "DMARC enforcement gate") exists precisely to let such a message
+  still go out under the list's own aligned identity instead. A footer is deferred because, unlike
+  the `Subject` prefix (a clean header rewrite), the only Sieve body primitive available here
+  (RFC 5703 `replace`) can't append to a body without also regenerating the `Message-ID` on
+  single-part messages and can't touch `text/html` alternatives — so a correct footer needs more
+  than the current built-in-script mechanism offers
 - richer policy context exposed to scripts: DMARC/DKIM/SPF results are now exposed (see "DMARC
   enforcement gate"); still open: spam-filter results, message size
 - custom Sieve functions registered via the runtime builder's `with_functions`, so policy

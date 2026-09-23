@@ -825,3 +825,84 @@ async fn apply_munge_from_rewrites_from_and_reply_to() {
     assert!(out.contains("To: dev@lists.example.org"));
     assert!(out.contains("body"));
 }
+
+/// The bare tag is the only supplied value; the built-in `subject-prefix.sieve` script wraps it in
+/// `[...]`, composes it with the message's Subject, and decides the reply/no-Subject cases below.
+const SUBJECT_PREFIX_ENV: [(&str, &str); 1] = [("vnd.carriers.subject_prefix", "dev")];
+
+#[tokio::test]
+async fn apply_subject_prefix_prepends_the_prefix_to_the_subject() {
+    let engine = PolicyEngine::new().unwrap();
+    let raw =
+        b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\nSubject: Hello list\r\n\r\nbody\r\n";
+
+    let out = engine
+        .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, raw)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(out.contains("Subject: [dev] Hello list"));
+    // The old, un-prefixed Subject is gone (not left alongside the new one).
+    assert!(!out.contains("Subject: Hello list"));
+    // The body and other headers survive untouched.
+    assert!(out.contains("From: Alice <alice@example.com>"));
+    assert!(out.contains("To: dev@lists.example.org"));
+    assert!(out.contains("body"));
+}
+
+#[tokio::test]
+async fn apply_subject_prefix_does_not_stack_when_the_prefix_is_already_at_the_front() {
+    let engine = PolicyEngine::new().unwrap();
+    // The prefix "at the front" means either the very start, or right after a run of reply/forward
+    // markers (anything ending in a colon-space). None of these may be prefixed a second time.
+    for subject in [
+        "[dev] Hello list",          // already at the very start
+        "Re: [dev] Hello list",      // after a reply marker
+        "Fwd: [dev] Hello list",     // after a forward marker
+        "Re: Fwd: [dev] Hello list", // after a marker chain
+    ] {
+        let raw = format!("From: Alice <alice@example.com>\r\nSubject: {subject}\r\n\r\nbody\r\n")
+            .into_bytes();
+        let out = engine
+            .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, &raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            out, raw,
+            "`{subject}` already carries the prefix at the front and must be left unchanged"
+        );
+    }
+}
+
+#[tokio::test]
+async fn apply_subject_prefix_still_prefixes_when_the_token_only_appears_mid_subject() {
+    let engine = PolicyEngine::new().unwrap();
+    // The prefix string appears later in the Subject as ordinary text, not as the list prefix at
+    // the front — so it must still be prefixed (the tightened check is anchored, not a substring).
+    let raw = b"From: Alice <alice@example.com>\r\nSubject: Hello [dev] world\r\n\r\nbody\r\n";
+
+    let out = engine
+        .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, raw)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(out.contains("Subject: [dev] Hello [dev] world"));
+}
+
+#[tokio::test]
+async fn apply_subject_prefix_uses_the_prefix_as_the_subject_when_there_is_none() {
+    let engine = PolicyEngine::new().unwrap();
+    // No Subject header at all: the prefix becomes the whole Subject.
+    let raw = b"From: Alice <alice@example.com>\r\nTo: dev@lists.example.org\r\n\r\nbody\r\n";
+
+    let out = engine
+        .apply_subject_prefix("dev", LIST_ID, &SUBJECT_PREFIX_ENV, raw)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(out.contains("Subject: [dev]"));
+    assert!(out.contains("body"));
+}

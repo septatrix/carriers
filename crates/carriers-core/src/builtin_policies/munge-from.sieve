@@ -3,9 +3,11 @@
 # original sender, so replies still reach the human rather than just the list.
 #
 # This is an available mechanism, not automatically triggered by anything built-in today: a custom
-# before/after drop-in can request it by filing into the `munge-from` pseudo-mailbox (e.g. for a
-# future DKIM-breaking transform like a footer or Subject prefix, where preserving the author's
-# original identity is no longer possible anyway). The values are computed once in Rust (see
+# before/after drop-in can request it by filing into the `munge-from` pseudo-mailbox. It is the
+# recommended companion to the opt-in `subject-prefix.sieve` transform (and to any future
+# DKIM-breaking transform such as a body footer): once the author's original identity can no longer
+# be preserved, moving to the list's own aligned identity is what keeps DMARC passing. The values
+# are computed once in Rust (see
 # `transform::munge_from_env`) and exposed here as `${env.vnd.carriers.*}` variables; any
 # pre-existing `From`/`Reply-To` is replaced outright, not merged.
 

@@ -313,9 +313,11 @@ pub async fn finalize(
         PolicyDecision::Approve => {
             let recipients = members.recipients(&list.name).await?;
 
-            // The pristine inbound bytes, before any of carriers' own transforms — the diff
-            // baseline for the list's own DKIM2 chain link (see `sign::sign_and_seal`), which
-            // records exactly what carriers changed (munge-from, if any, plus List headers).
+            // The pristine inbound bytes, before any of carriers' own transforms. Two later steps
+            // need what we actually received rather than the transformed outbound copy: the ARC
+            // seal records this message's ingress authentication (see `sign::sign_and_seal`), and
+            // it is the diff baseline for the list's own DKIM2 chain link (which records exactly
+            // what carriers changed — a Subject prefix / munge-from, if any, plus List headers).
             let original_raw = raw;
 
             // An "after" tier may request From/Reply-To munging (`fileinto "munge-from"`) — an
@@ -333,6 +335,23 @@ pub async fn finalize(
                 raw
             };
 
+            // Opt-in `Subject` prefix (`list.cfg.subject_prefix`) — DKIM-breaking, so run only for
+            // a list that configured one (`subject_prefix_env` returns `None` otherwise). The
+            // script itself composes `<prefix> <Subject>` and skips a reply that already carries
+            // the prefix. See that list config field's docs.
+            let prefixed;
+            let raw = match transform::subject_prefix_env(list) {
+                Some(subject_env) => {
+                    let subject_env: Vec<(&str, &str)> =
+                        subject_env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                    prefixed = policy
+                        .apply_subject_prefix(&list.name, &list_id, &subject_env, raw)
+                        .await?;
+                    prefixed.as_slice()
+                }
+                None => raw,
+            };
+
             let owned = transform::list_header_env(list);
             let header_env: Vec<(&str, &str)> =
                 owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -343,6 +362,7 @@ pub async fn finalize(
                 authenticator,
                 list,
                 hostname,
+                original_raw,
                 &augmented,
                 ingress,
                 outcome.no_own_dkim,
