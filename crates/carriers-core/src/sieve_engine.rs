@@ -20,6 +20,7 @@ pub trait ExternalLists: Send + Sync {
 
 /// Resolves Sieve's `duplicate` test (RFC 7352): tracks message identifiers that have been seen
 /// so a repeat can be detected. Implemented by the caller against durable storage.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DuplicateStore: Send + Sync {
     /// Whether `id` has already been seen (within the last `expiry` seconds), recording it as

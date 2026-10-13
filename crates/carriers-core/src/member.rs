@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::store::{Member, Store};
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait MemberProvider: Send + Sync {
     /// True if the address is recorded for the list at all, under any role.
